@@ -1,21 +1,25 @@
 ---
 name: check
 description: Check the sparring prerequisites (git, Claude Code, and the reviewer CLIs Codex and Antigravity with their sign-in), show real install commands for anything missing, and install them with the user's permission.
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh) Bash(${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh --need *) Read
+allowed-tools: Bash("${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh") Bash("${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh" --need *) Bash(${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh) Bash(${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh --need *) Bash("${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh" --deep) Bash("${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh" --deep *) Bash(${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh --deep) Bash(${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh --deep *) PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/check-prereqs.ps1") PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/check-prereqs.ps1" -Need *) PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/check-prereqs.ps1" -Deep) PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/check-prereqs.ps1" -Deep *) Read
 ---
 
 # Sparring: prerequisites check
 
 Arguments (optional): $ARGUMENTS. If they name reviewer tools (`codex`, `agy`), pass them as
-`--need codex,agy`. Without them, at least one reviewer must be ready.
+`--need codex,agy`. Without them, at least one reviewer must be ready. If they include `deep`,
+pass `--deep` (PowerShell: `-Deep`) first, before any `--need`: it sends `agy` one tiny test
+prompt to confirm it is signed in, because `agy` has no sign-in status command. It takes a few
+seconds and one model request, so use it only when asked or when an `agy` review failed.
 
 ## 1. Run the check for this platform
 
 Your environment info gives the platform.
 - **macOS, Linux, WSL**, or **Windows with the Bash tool** (Git Bash):
-  `${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh [--need <tools>]`
+  `"${CLAUDE_SKILL_DIR}/scripts/check-prereqs.sh" [--deep] [--need <tools>]` (keep the double
+  quotes: the path can contain spaces, or backslashes on Windows)
 - **Windows without the Bash tool** (PowerShell tool only):
-  `powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/check-prereqs.ps1" [-Need <tools>]`
+  `powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/check-prereqs.ps1" [-Deep] [-Need <tools>]`
   (use `pwsh` in place of `powershell` if it is installed)
 
 The output ends with `RESULT: ready` or `RESULT: missing <items>`, then `READY_REVIEWERS:`.
@@ -40,7 +44,7 @@ installed safely without a password:
 | `agy` | the check script with `install agy` (Google's official installer). Mark it beta |
 | `claude` | the check script with `install claude` (official installer). Only relevant when this check was run outside Claude Code |
 | `codex-login` | **The user does this themselves.** Sign-in opens a browser or needs a secret. Tell them to type `! codex login` in this prompt, or `! codex login --device-auth` on a remote machine. With `OPENAI_API_KEY` set, they can run `! printenv OPENAI_API_KEY \| codex login --with-api-key` |
-| agy sign-in | **The user does this themselves**: run `agy` once interactively in a terminal |
+| `agy-login` (or agy sign-in) | **The user does this themselves**: run `agy` once interactively in a terminal (not with `!`, it needs a real terminal). Without `deep`, the check cannot tell whether agy is signed in; if they are unsure, offer to re-run it with `deep` |
 | `git`, `gh`, `glab` | **The user does this themselves**, with the printed command, because it needs sudo or a system installer |
 
 Run the install command only for items the user selected: `<check script> install <item>`

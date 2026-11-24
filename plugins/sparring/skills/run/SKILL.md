@@ -3,7 +3,7 @@ name: run
 description: Sparring. Implement a coding task with Claude as developer and another vendor's CLI (Codex, or Antigravity in beta) as reviewer, looping on its own until the reviewer approves. Asks the user only when they cannot agree.
 argument-hint: "[orchestrator=MODEL] [dev=M1,M2,M3] [reviewer=tool/model:effort,...] [tiebreaker=tool/model:effort] [rounds=N] <task>"
 disable-model-invocation: true
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/review.sh *) Bash(git status *) Bash(git diff *) Bash(git log *) Read Write Edit Grep Glob
+allowed-tools: Bash("${CLAUDE_SKILL_DIR}/scripts/review.sh" *) Bash(${CLAUDE_SKILL_DIR}/scripts/review.sh *) PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/review.ps1" *) PowerShell(pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/review.ps1" *) Bash(git status *) Bash(git diff *) Bash(git log *) Read Write Edit Grep Glob
 ---
 
 # Sparring: developer / reviewer loop
@@ -46,20 +46,29 @@ for deep.
 
 Your environment info gives the platform.
 - **macOS, Linux, WSL**, or **Windows with the Bash tool** (Git Bash): run
-  `${CLAUDE_SKILL_DIR}/scripts/review.sh <args>`
+  `"${CLAUDE_SKILL_DIR}/scripts/review.sh" <args>`. Keep the double quotes: the path can
+  contain spaces, or backslashes on Windows, and unquoted bash would break it.
 - **Windows without the Bash tool** (PowerShell tool only): run
   `powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/review.ps1" <args>`
   (use `pwsh` in place of `powershell` if it is installed). The arguments are the same.
 
 Below, `REVIEW <args>` means the command for this platform.
 
+**Timeouts.** Reviews can take several minutes. Run every `REVIEW review ...` call with the
+Bash or PowerShell tool's `timeout` set to `600000` (10 minutes, the maximum). The script
+stops the reviewer itself after 540 seconds and exits 7, so the tool never cuts it off
+silently. On exit 7, run the same command once more with `--timeout 1800` added right after
+`review` and with `run_in_background: true`, then wait for its completion notification and
+read its output. If it times out again, tell the user and stop.
+
 ## 2. Set up
 
-1. Run `REVIEW init <tools>`, where `<tools>` is the comma-separated set of reviewer tools in
-   `reviewer=` and `tiebreaker=` (for example `codex` or `codex,agy`). It checks those are
-   ready.
+1. Run `REVIEW init <tools> --rounds <rounds>`, adding `--tiebreaker` when `tiebreaker=` is
+   set. `<tools>` is the comma-separated set of reviewer tools in `reviewer=` and
+   `tiebreaker=` (for example `codex` or `codex,agy`). It checks those are ready, and saves
+   the round limit and the tiebreaker setting for `REVIEW status`.
    - If it reports missing prerequisites, run the `sparring:check` skill to fix them, then
-     run `REVIEW init <tools>` again. Stop if they are still missing.
+     run the same `REVIEW init` again. Stop if they are still missing.
    - If it reports no commits, tell the user and stop.
    - If it warns about uncommitted changes, ask the user once with AskUserQuestion:
      include them in the review, or stop so they can commit or stash first.
@@ -82,53 +91,82 @@ the Agent tool's model parameter** to the developer model for the current tier. 
 task, the relevant context you know, and this instruction: implement it, run the relevant
 tests, and report the files changed and the test results.
 
-## 5. Review loop
+**Keep that developer.** Note the agent's id. For every later response, continue the same
+agent with SendMessage, so it keeps what it learned about the code and its earlier answers.
+Start a new developer only when the tier's developer model changes, or SendMessage is not
+available. Then brief it fully: the task, the files changed so far, and every
+`.sparring/round-*.response.md` written so far.
 
-For round = 1, 2, … up to the round limit:
+## 5. Review loop, driven by `REVIEW status`
 
-1. Run `REVIEW review <round> <tool> <model> <effort> [response-file]` with the current tier's
-   reviewer entry. Pass the previous round's response file, if there is one. The script
-   prints JSON: `verdict`, `summary`, `issues[]` (id, severity, location, comment,
-   suggestion), `withdrawn[]`. If the output is a wrapper object instead, the verdict is in
-   its `structured_output` field.
-   - Exit 6 means the reviewer changed files, and the review is rejected. Tell the user
-     which files changed (`git status`), and stop.
-2. If `verdict` is `approve`, go to step 7.
-3. Otherwise send the blocking issues, as JSON, to a developer subagent on the current tier's
-   model. For each issue, it must either **fix** it, or **rebut** it with a concrete
-   technical reason (not preference). It may also apply nits that are cheap and clearly
-   right.
-4. Write its answer to `.sparring/round-<round>.response.md`, one section per issue id:
-   `R1: FIXED, what changed` or `R1: REBUTTED, why`.
-5. Track disputes. An issue is **disputed** when the developer has rebutted it and the
-   reviewer has kept it open after reading that rebuttal.
+You make the judgment calls. The script keeps the books: round numbers, which issues are
+open, disputed or closed, when to escalate, and which step comes next. **After the
+implementation, and after every review and every response file, run `REVIEW status`** and
+do what its `next:` line says. It only reads `.sparring/`, so you can run it at any time.
 
-When a round makes no progress (the same blocking ids are open and none were fixed), move up
-one tier for the next round, for both the developer and the reviewer, unless you are already
-on deep.
+```
+stage: normal | escalation | tiebreak | final | user | done
+next: review N | respond N | tiebreak N | fix-after-tiebreak N | ask-user | finish
+response_file: .sparring/round-<N-1>.response.md   (pass it to the review)
+tier: same | up | deep
+result: approved | approved-after-tiebreak | user-decided   (with next: finish)
+open: R1 R3        disputed: R3        closed: R2        fix: R4        note: ...
+```
 
-## 6. Deadlock
+**Tier.** `same`: keep the current tier. `up`: the last round made no progress (the same
+blocking issues are still open), so move up one tier for both the developer and the
+reviewer, unless you are on deep. `deep`: use the deep tier for both.
 
-When the round limit is reached with blocking issues still open, or only disputed issues
-remain:
+| `next:` | What you do |
+|---|---|
+| `review N` | Run `REVIEW review N <tool> <model> <effort> [response_file]` with the tier's reviewer entry. In stage `user`, run it only if the user's decisions changed code; otherwise go to step 7. |
+| `respond N` | Send review N's blocking issues, as JSON, to the developer. For each one it must **fix** it, or **rebut** it with a concrete technical reason (not preference). It may also apply nits that are cheap and clearly right. In stage `escalation`, tell it to re-examine only the open issues, with fresh eyes on both sides' arguments. Write its answer to `.sparring/round-N.response.md`. |
+| `tiebreak N` | Run `REVIEW review --tiebreak N <tool> <model> <effort> .sparring/round-N.response.md` with the `tiebreaker=` entry. It judges each open issue on the merits. |
+| `fix-after-tiebreak N` | The tiebreaker kept the issues in `fix:`. The developer must fix them, with no second rebuttal. Append one line per issue to `round-N.response.md`: `R4: FIXED after tiebreak, what changed`. Issues in `closed:` stay closed even if a later review raises them again. |
+| `ask-user` | Ask with AskUserQuestion, one question per issue in `open:` (up to 4 per call; make more calls if needed). State the reviewer's position and the developer's (and the tiebreaker's, if any) in one or two sentences each. Options: "Apply the reviewer's fix", "Keep developer's version", and a compromise where one makes sense. Apply the decisions with the developer, then write them to `.sparring/round-N.response.md`, one line per issue (`R5: user chose the reviewer's fix`). |
+| `finish` | Go to step 7, reporting `result:`. |
 
-1. If you have not run one yet, run one **escalation round** on the deep tier. The developer
-   re-examines only the open issues, with fresh eyes on both sides' arguments, and the
-   reviewer then reviews again. If that resolves everything, go to step 7.
-2. If `tiebreaker=` is set and disputed issues remain, run
-   `REVIEW review --tiebreak <last-round> <tool> <model> <effort> <last-response-file>`.
-   Two of three decide each disputed issue:
-   - the tiebreaker keeps the issue → the developer fixes it, then run one normal review round;
-   - the tiebreaker withdraws it → the issue is closed.
-   Report the tiebreaker's reasons in the summary.
-3. If issues are still open, ask the user with AskUserQuestion, one question per issue
-   (up to 4; batch more if needed). In each question, state the reviewer's position and the
-   developer's position (and the tiebreaker's, if any) in one or two sentences each.
-   Options: "Apply the reviewer's fix", "Keep developer's version", and a third option where
-   there is a sensible compromise.
-4. Apply the user's decisions with the developer subagent. Run one last review only if the
-   user's choice introduced new code. Then go to step 7 whatever that review says, and
-   report anything it raised.
+**Response files** are read by `status`, so start each line with the issue id and one of
+these words:
+
+```
+R1: FIXED - what changed
+R2: REBUTTED - why, with the evidence
+R7: SAME AS R2
+R4: FIXED after tiebreak - what changed
+```
+
+**Matching issues across rounds.** Every reviewer run starts fresh, and a tier change also
+changes the model, so ids can drift. If a review raises an issue under a new id but its
+location and problem match an earlier issue, add a line `R7: SAME AS R2` to that round's
+response file, then answer it as R2. Status then counts it as the same issue for disputes,
+progress and closing. Deciding that two issues are the same is your call; the script cannot
+make it.
+
+**Errors from `REVIEW review`:**
+- Exit 6 means the reviewer changed files, and the review is rejected. The script saved the
+  tree just before the reviewer ran. Show the user which files changed (`git status`), then
+  ask once with AskUserQuestion: "Undo the reviewer's changes and continue" (run
+  `REVIEW restore N`, or `REVIEW restore --tiebreak N` for a tiebreak, then run the same
+  review again once) or "Stop so I can inspect them". If the restore fails, or the reviewer
+  changes files again, stop.
+- Exit 4 means the reviewer failed or gave an invalid verdict. Run the same command once more;
+  if it fails again, show the error and stop.
+- If `REVIEW status` fails, show its error and stop.
+
+## 6. The rules `status` applies
+
+You don't need to apply these yourself. They're here so you can explain a decision to the
+user.
+
+- Rounds N = 1, 2, … run up to the limit L (`rounds=`). A round is review N, then response N.
+- An open issue is **disputed** when the developer rebutted it in response N-1 and review N
+  kept it anyway. When every open issue is disputed, the deadlock starts early, at round N.
+- **Deadlock:** one escalation round E = L+1 on deep. If response E still rebuts something and
+  a tiebreaker is set, the tiebreaker judges review E. Issues it keeps must be fixed; issues
+  it drops are closed. Then a final review F = E+1. Whatever is still open goes to the user,
+  and one last review F+1 follows only if the user's decisions changed code.
+- Any review with no open blocking issues (closed ones don't count) ends the loop as approved.
 
 ## 7. Finish
 
@@ -137,4 +175,5 @@ Do not commit or push unless the task asked for it. Report briefly:
 - Orchestrator model, and each round's developer model and reviewer tool/model/effort
 - Files changed and test status
 - Nits left unaddressed (one line each)
-- Any tiebreaker or user decisions, and where the round files are (`.sparring/`)
+- Any tiebreaker or user decisions, and where the round files are (`.sparring/`; the run
+  before this one is in `.sparring/previous/`)

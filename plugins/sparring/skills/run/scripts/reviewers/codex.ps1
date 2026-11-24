@@ -12,5 +12,6 @@ $codexArgs = @('exec', '--sandbox', 'read-only', '--output-schema', $Schema, '-o
 if ($Model -ne 'default') { $codexArgs += @('-m', $Model) }
 $codexArgs += $prompt
 
-& codex @codexArgs | Out-Null
+# Empty stdin, so codex never waits on it.
+$null | & codex @codexArgs | Out-Null
 exit $LASTEXITCODE

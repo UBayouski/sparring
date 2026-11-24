@@ -65,7 +65,9 @@ In a Claude Code session, in your project folder (a git repo with at least one c
 
 `check` reports what is missing, prints the real install commands for your OS, and offers to
 install Codex, Antigravity or Claude Code for you. Each install runs only after you approve
-it. You sign in to the reviewers yourself (`! codex login`, or run `agy` once).
+it. You sign in to the reviewers yourself (`! codex login`, or run `agy` once). Codex reports
+its sign-in status, but `agy` has no such command: `/sparring:check deep` sends `agy` one tiny
+test prompt to confirm it is signed in.
 
 ### Choosing models and reviewers
 
@@ -102,15 +104,26 @@ To use it from anywhere, put it on your PATH, e.g.
 ## What happens in a run
 
 1. `init` checks the prerequisites for the reviewers you chose, records the base commit in
-   `.sparring/base`, and warns about uncommitted changes. `.sparring/` ignores itself, so
-   your `.gitignore` is not touched.
-2. The developer subagent implements the task and runs the tests.
+   `.sparring/base`, saves the round limit and tiebreaker setting in `.sparring/config`, and
+   warns about uncommitted changes. `.sparring/` ignores itself, so your `.gitignore` is not
+   touched. The files of the run before are moved to `.sparring/previous/`.
+2. The developer subagent implements the task and runs the tests. The same developer is
+   continued for every round while its model stays the same.
 3. The reviewer reads the task and the diff and returns JSON that matches
    `review.schema.json`: a verdict, plus issues marked `blocking` or `nit`, with stable ids.
    - Codex runs in its **read-only sandbox**.
    - Antigravity runs in **plan mode with its terminal sandbox on**.
    - For both, the driver fingerprints the working tree before and after, and **rejects the
-     review if any file changed**.
+     review if any file changed**. Just before the reviewer runs, it also saves the tree as
+     a git tree object (no commit, no ref, the index untouched). `review.sh restore <round>`
+     undoes whatever the reviewer did: edits, deletions and new files. Files the developer
+     changed come back byte for byte. Files nobody had touched come back as `git checkout`
+     writes them.
+   - The driver checks the verdict against the schema. An `approve` that still lists
+     blocking issues counts as `changes_requested`.
+   - A reviewer that runs past 540 seconds is stopped (exit 7), so a slow review never hits
+     Claude Code's 10-minute tool limit unnoticed. The orchestrator retries it once in the
+     background with a longer limit. Set `SPARRING_REVIEW_TIMEOUT` to change the default.
 4. The developer fixes each blocking issue or rebuts it with a technical reason. The reviewer
    then re-reviews with the rebuttals in hand and withdraws issues it is convinced on.
 5. Deadlock (round limit reached, or issues disputed): one escalation round on the strongest
@@ -118,6 +131,72 @@ To use it from anywhere, put it on your PATH, e.g.
    decide. Anything still open comes to you as one question per issue, with every position.
 6. Nothing is committed or pushed. You get a summary, and every round is saved in
    `.sparring/` (diff, prompt, review JSON, response, reviewer log).
+
+Steps 3–5 are driven by `review.sh status` (see below), not by the orchestrator's memory.
+
+## Loop bookkeeping: `status`
+
+The loop has a lot of state: which round this is, which issues are open, which ones the
+developer rebutted and the reviewer kept anyway, when to escalate a tier, when the deadlock
+starts, what the tiebreaker closed. Asking the orchestrator model to track all of that from
+prose instructions invites drift: a skipped step, a wrong round number, a tiebreak that
+shouldn't run. So the script does it.
+
+`review.sh status` (or `review.ps1 status`) reads the round files in `.sparring/` and prints
+where the loop stands and what to do next. It never changes anything, so you can run it
+yourself at any point of a run, or after one:
+
+```
+$ plugins/sparring/skills/run/scripts/review.sh status
+stage: tiebreak
+next: fix-after-tiebreak 3
+tier: deep
+round: 3
+limit: 2
+open: R2 R3
+disputed: R2
+tiebreak_kept: R3
+closed: R2
+fix: R3
+note: fix each kept issue, then add 'ID: FIXED after tiebreak, ...' to .sparring/round-3.response.md
+```
+
+The orchestrator runs it after every review and every response, and does what `next:` says:
+
+| `next:` | Meaning |
+|---|---|
+| `review N` | run review N, passing `response_file:` |
+| `respond N` | the developer fixes or rebuts review N's blocking issues |
+| `tiebreak N` | the tiebreaker judges review N's open issues |
+| `fix-after-tiebreak N` | the developer fixes the issues the tiebreaker kept (`fix:`) |
+| `ask-user` | you decide the issues in `open:` |
+| `finish` | done; `result:` is `approved`, `approved-after-tiebreak` or `user-decided` |
+
+`tier:` is `same`, `up` (the last round made no progress, so move up a tier) or `deep`.
+
+The orchestrator still makes the judgment calls: picking the tier, briefing the developer,
+deciding that a reviewer's new id is an old issue in other words. It records that last one
+in the response file as `R7: SAME AS R2`, and `status` then treats them as one issue.
+Response files use one line per issue, starting with the id:
+
+```
+R1: FIXED - what changed
+R2: REBUTTED - why, with the evidence
+R7: SAME AS R2
+R4: FIXED after tiebreak - what changed
+```
+
+The rules it applies:
+- A round is review N, then response N, for N up to the limit (`rounds=`).
+- An issue is **disputed** when the developer rebutted it and the next review kept it. If
+  every open issue is disputed, the deadlock starts early.
+- Deadlock: an escalation round on deep models, then the tiebreaker if one is set and
+  something is still rebutted. Issues the tiebreaker keeps must be fixed; issues it drops are
+  closed for good, even if raised again. Then a final review, then you, then one last review
+  only if your decisions changed code.
+
+`status` needs jq, python3 or node in bash. On Windows without them, `review.sh status`
+hands over to `review.ps1 status`, which needs nothing extra.
 
 ## Adding a reviewer
 
@@ -137,21 +216,22 @@ the tool to `check-prereqs` so `--need <tool>` works.
 - **Codex reviewer:** stable.
 - **Antigravity reviewer:** beta. Older `agy` versions printed nothing when not run in a real
   terminal; if a review comes back empty, update `agy`.
-- **PowerShell scripts:** written for Windows PowerShell 5.1 and pwsh, but not yet tested on
-  Windows. Reports welcome.
+- **PowerShell scripts:** smoke-tested on Windows PowerShell 5.1 with fake reviewers
+  (`tests/run-tests.ps1`), including non-ASCII file names and content. Not yet run against
+  the real CLIs on Windows. Reports welcome.
 
 ## Layout
 
 ```
 .claude-plugin/marketplace.json          marketplace catalog (this repo)
 bin/sparring, bin/sparring.ps1           launchers that set the orchestrator model
-tests/run-tests.sh                       smoke tests (fake codex and agy, no network)
+tests/run-tests.{sh,ps1}                 smoke tests (fake codex and agy, no network)
 plugins/sparring/
   .claude-plugin/plugin.json
   agents/developer.md                    developer subagent (model chosen per call)
   skills/run/SKILL.md                    the orchestration loop
   skills/run/review.schema.json          verdict schema shared by all reviewers
-  skills/run/scripts/review.{sh,ps1}     driver: diff, prompt, tree check
+  skills/run/scripts/review.{sh,ps1}     driver: diff, prompt, tree check, loop status
   skills/run/scripts/reviewers/          adapters: codex.{sh,ps1}, agy.{sh,ps1}
   skills/check/SKILL.md                  prerequisites check and guided install
   skills/check/scripts/check-prereqs.{sh,ps1}
@@ -160,7 +240,8 @@ plugins/sparring/
 ## Develop
 
 ```bash
-bash tests/run-tests.sh                          # smoke tests
+bash tests/run-tests.sh                          # smoke tests (bash scripts)
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1   # PowerShell scripts
 claude plugin validate .                         # check the marketplace and plugin
 claude --plugin-dir ./plugins/sparring           # try local changes without installing
 ```

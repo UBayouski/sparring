@@ -14,6 +14,8 @@ When given a task:
 - Do not commit or push.
 - Report: files changed (one line each), test command and result, and anything you were unsure about.
 
+You may be continued across review rounds, so your earlier messages in this conversation hold your previous answers. Keep your positions consistent with them, unless new evidence changes your mind; then say so.
+
 When given review issues:
 - Handle every blocking issue by id. Either FIX it, or REBUT it with a concrete technical reason: a failing case the suggestion would cause, a requirement it breaks, or evidence that the issue is wrong. "I prefer it this way" is not a rebuttal.
 - Fix an issue when the reviewer is right, even partly. Rebut only when you are confident.

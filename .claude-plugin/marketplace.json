@@ -2,7 +2,7 @@
   "name": "sparring",
   "description": "Claude Code as developer, another vendor's CLI as reviewer, sparring until they agree",
   "owner": {
-    "name": "YOUR_NAME"
+    "name": "Uladzislau Bayouski"
   },
   "plugins": [
     {

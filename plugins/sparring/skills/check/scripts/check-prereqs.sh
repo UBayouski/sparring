@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Prerequisite checker and installer for sparring.
 #
-#   check-prereqs.sh [--need codex,agy]
+#   check-prereqs.sh [--need codex,agy] [--deep]
 #                               Check everything; print install commands for anything missing.
 #                               --need: reviewer CLIs that must be ready (default: at least one)
+#                               --deep: send agy one tiny test prompt to confirm it is signed in
+#                                       (agy has no sign-in status command; takes a few seconds)
 #   check-prereqs.sh install claude|codex|agy
 #                               Install one tool with the recommended method for this machine.
 #
@@ -21,6 +23,17 @@ case "$OS" in
 esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Windows: a PowerShell one-liner that also works when typed in bash (Claude Code's "!" runs bash).
+ps_cmd() { echo "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$1\""; }
+
+# Windows installers put agy here but only update PATH for new terminals.
+add_agy_path() {
+  [[ "$PLATFORM" == windows && -n "${LOCALAPPDATA:-}" ]] || return 0
+  local d; d="$(cygpath -u "$LOCALAPPDATA" 2>/dev/null || echo "$LOCALAPPDATA")/agy/bin"
+  [[ -x "$d/agy.exe" || -x "$d/agy" ]] && ! have agy && export PATH="$d:$PATH"
+  return 0
+}
 ver()  { "$@" 2>/dev/null | head -n 1; }
 
 # ---------- install hints (real commands, per platform) ----------
@@ -38,7 +51,7 @@ hint_git() {
 
 hint_claude() {
   case "$PLATFORM" in
-    windows) echo "    irm https://claude.ai/install.ps1 | iex      # PowerShell" ;;
+    windows) echo "    $(ps_cmd 'irm https://claude.ai/install.ps1 | iex')" ;;
     *)
       echo "    curl -fsSL https://claude.ai/install.sh | bash   # recommended, auto-updates"
       [[ "$PLATFORM" == macos ]] && echo "    brew install --cask claude-code                  # Homebrew alternative"
@@ -69,10 +82,15 @@ hint_forge_cli() {  # gh | glab
 
 hint_agy() {
   case "$PLATFORM" in
-    windows) echo "    irm https://antigravity.google/cli/install.ps1 | iex      # PowerShell" ;;
+    windows) echo "    $(ps_cmd 'irm https://antigravity.google/cli/install.ps1 | iex')" ;;
     *)       echo "    curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
   esac
   echo "    then run 'agy' once to sign in (or use a Gemini API key, see the agy docs)"
+}
+
+hint_agy_login() {
+  echo "    agy                                                # run once in a terminal and sign in"
+  echo "    (or use a Gemini API key, see the agy docs)"
 }
 
 hint_codex_login() {
@@ -98,7 +116,12 @@ install_tool() {
   case "$tool" in
     claude)
       if have claude; then echo "claude is already installed: $(ver claude --version)"; return 0; fi
-      [[ "$PLATFORM" == windows ]] && { echo "On Windows run in PowerShell:  irm https://claude.ai/install.ps1 | iex"; return 2; }
+      if [[ "$PLATFORM" == windows ]]; then
+        echo "+ $(ps_cmd 'irm https://claude.ai/install.ps1 | iex')"
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex" || return 1
+        echo "Installed. Open a new terminal if 'claude' is not on PATH yet, then run 'claude' to sign in."
+        return 0
+      fi
       have curl || { echo "curl is required for the native installer"; return 2; }
       echo "+ curl -fsSL https://claude.ai/install.sh | bash"
       curl -fsSL https://claude.ai/install.sh | bash || return 1
@@ -126,8 +149,14 @@ install_tool() {
       echo "Installed: $(ver codex --version). Next: sign in with 'codex login'."
       ;;
     agy)
+      add_agy_path
       if have agy; then echo "agy is already installed: $(ver agy --version)"; return 0; fi
-      [[ "$PLATFORM" == windows ]] && { echo "On Windows run in PowerShell:  irm https://antigravity.google/cli/install.ps1 | iex"; return 2; }
+      if [[ "$PLATFORM" == windows ]]; then
+        echo "+ $(ps_cmd 'irm https://antigravity.google/cli/install.ps1 | iex')"
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex" || return 1
+        echo "Installed. Open a new terminal if 'agy' is not on PATH yet, then run 'agy' once to sign in."
+        return 0
+      fi
       have curl || { echo "curl is required for the agy installer"; return 2; }
       echo "+ curl -fsSL https://antigravity.google/cli/install.sh | bash"
       curl -fsSL https://antigravity.google/cli/install.sh | bash || return 1
@@ -141,8 +170,14 @@ install_tool() {
   esac
 }
 
-need=""
-if [[ "${1:-}" == --need ]]; then need="${2:-}"; shift 2 || true; fi
+need="" deep=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --need) need="${2:-}"; shift; shift || true ;;
+    --deep) deep=1; shift ;;
+    *) break ;;
+  esac
+done
 
 if [[ "${1:-}" == install ]]; then
   install_tool "${2:-}"
@@ -150,6 +185,8 @@ if [[ "${1:-}" == install ]]; then
 fi
 
 # ---------- check ----------
+
+add_agy_path
 
 missing=()
 report() { printf '%-9s %-14s %s\n' "$1" "$2" "$3"; }
@@ -167,7 +204,7 @@ else report MISSING claude "required (Claude Code, the developer)"; hint_claude;
 ready_reviewers=()
 if have codex; then
   if codex login status >/dev/null 2>&1; then
-    report OK codex "$(ver codex --version), $(ver codex login status)"; ready_reviewers+=(codex)
+    report OK codex "$(ver codex --version), $(codex login status 2>&1 | head -n 1)"; ready_reviewers+=(codex)
   else
     report MISSING codex-login "Codex is installed but not signed in"; hint_codex_login
     codex_unready=1
@@ -176,9 +213,22 @@ else
   report REVIEWER codex "not installed (OpenAI Codex CLI)"; hint_codex
 fi
 if have agy; then
-  # agy has no sign-in status command; headless runs fail with "authentication required" if needed.
-  report OK agy "$(ver agy --version) (beta reviewer; run 'agy' once interactively if not signed in)"
-  ready_reviewers+=(agy)
+  # agy has no sign-in status command. --deep sends one tiny prompt (outside plan mode, which
+  # would answer with a plan file) and expects "ok" back.
+  if [[ -n "$deep" ]]; then
+    probe="$(cd "${TMPDIR:-/tmp}" && agy -p "Reply with only the word ok. Do not use any tools."              --sandbox --effort low --print-timeout 90s </dev/null 2>&1)"; probe_code=$?
+    if ((probe_code == 0)) && [[ "$(printf '%s' "$probe" | tr -d '[:space:].!' | tr '[:upper:]' '[:lower:]')" == ok ]]; then
+      report OK agy "$(ver agy --version), signed in (test prompt answered; beta reviewer)"
+      ready_reviewers+=(agy)
+    else
+      report MISSING agy-login "agy is installed but the test prompt failed (exit $probe_code): $(printf '%s' "$probe" | tail -n 1)"
+      hint_agy_login
+      agy_unready=1
+    fi
+  else
+    report OK agy "$(ver agy --version) (beta reviewer; sign-in not verified, run the check with --deep)"
+    ready_reviewers+=(agy)
+  fi
 else
   report REVIEWER agy "not installed (Google Antigravity CLI, beta reviewer)"; hint_agy
 fi
@@ -187,10 +237,14 @@ if [[ -n "$need" ]]; then
   IFS=, read -r -a needed <<< "$need"
   for r in "${needed[@]}"; do
     [[ " ${ready_reviewers[*]:-} " == *" $r "* ]] && continue
-    if [[ "$r" == codex && -n "${codex_unready:-}" ]]; then missing+=(codex-login); else missing+=("$r"); fi
+    if [[ "$r" == codex && -n "${codex_unready:-}" ]]; then missing+=(codex-login)
+    elif [[ "$r" == agy && -n "${agy_unready:-}" ]]; then missing+=(agy-login)
+    else missing+=("$r"); fi
   done
 elif ((${#ready_reviewers[@]} == 0)); then
-  if [[ -n "${codex_unready:-}" ]]; then missing+=(codex-login); else missing+=("reviewer(codex or agy)"); fi
+  [[ -n "${codex_unready:-}" ]] && missing+=(codex-login)
+  [[ -n "${agy_unready:-}" ]] && missing+=(agy-login)
+  [[ -n "${codex_unready:-}${agy_unready:-}" ]] || missing+=("reviewer(codex or agy)")
 fi
 
 # Optional: the CLI for wherever this project is hosted. The review loop itself only uses

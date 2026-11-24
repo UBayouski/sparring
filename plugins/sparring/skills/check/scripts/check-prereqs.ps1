@@ -2,6 +2,8 @@
 #
 #   check-prereqs.ps1 [-Need codex,agy]  Check everything; print install commands for anything missing.
 #                                        -Need: reviewer CLIs that must be ready (default: at least one)
+#   check-prereqs.ps1 -Deep              Also send agy one tiny test prompt to confirm it is signed in
+#                                        (agy has no sign-in status command; takes a few seconds)
 #   check-prereqs.ps1 install claude|codex|agy
 #                                        Install one tool with the recommended method.
 #
@@ -11,11 +13,16 @@
 param(
   [Parameter(Position = 0)] [string] $Command,
   [Parameter(Position = 1)] [string] $Tool,
-  [string] $Need
+  [string] $Need,
+  [switch] $Deep
 )
 $ErrorActionPreference = 'Continue'
 
 function Have([string] $Name) { [bool](Get-Command $Name -ErrorAction SilentlyContinue) }
+
+# The agy installer only updates PATH for new terminals; find a fresh install anyway.
+$agyBin = Join-Path $env:LOCALAPPDATA 'agy\bin'
+if (-not (Have agy) -and (Test-Path (Join-Path $agyBin 'agy.exe'))) { $env:PATH = "$agyBin;$env:PATH" }
 function FirstLine { param([scriptblock] $Block) $o = & $Block 2>$null; if ($o) { "$(@($o)[0])".Trim() } }
 function Report([string] $Status, [string] $Name, [string] $Detail) { Write-Output ('{0,-9} {1,-14} {2}' -f $Status, $Name, $Detail) }
 
@@ -37,6 +44,10 @@ function Hint-ForgeCli([string] $Cli) {
 function Hint-Agy {
   Write-Output '    irm https://antigravity.google/cli/install.ps1 | iex'
   Write-Output "    then run 'agy' once to sign in (or use a Gemini API key, see the agy docs)"
+}
+function Hint-AgyLogin {
+  Write-Output '    agy                                           # run once in a terminal and sign in'
+  Write-Output '    (or use a Gemini API key, see the agy docs)'
 }
 function Hint-CodexLogin {
   Write-Output '    codex login                                   # browser sign-in with ChatGPT'
@@ -93,23 +104,42 @@ if (Have claude) { Report OK claude (FirstLine { claude --version }) }
 else { Report MISSING claude 'required (Claude Code, the developer)'; Hint-Claude; $missing += 'claude' }
 
 # Reviewers: each one is ready when installed (and, for codex, signed in).
-$ready = @(); $codexUnready = $false
+$ready = @(); $codexUnready = $false; $agyUnready = $false
 if (Have codex) {
   $status = & codex login status 2>&1
   if ($LASTEXITCODE -eq 0) { Report OK codex ((FirstLine { codex --version }) + ', ' + "$(@($status)[0])".Trim()); $ready += 'codex' }
   else { Report MISSING codex-login 'Codex is installed but not signed in'; Hint-CodexLogin; $codexUnready = $true }
 } else { Report REVIEWER codex 'not installed (OpenAI Codex CLI)'; Hint-Codex }
 if (Have agy) {
-  Report OK agy ((FirstLine { agy --version }) + " (beta reviewer; run 'agy' once interactively if not signed in)"); $ready += 'agy'
+  # agy has no sign-in status command. -Deep sends one tiny prompt (outside plan mode, which
+  # would answer with a plan file) and expects "ok" back.
+  if ($Deep) {
+    Push-Location ([System.IO.Path]::GetTempPath())
+    $probe = ($null | & agy -p 'Reply with only the word ok. Do not use any tools.' --sandbox --effort low --print-timeout 90s 2>&1) -join "`n"
+    $probeCode = $LASTEXITCODE
+    Pop-Location
+    if ($probeCode -eq 0 -and $probe.Trim() -match '^ok[.!]?$') {
+      Report OK agy ((FirstLine { agy --version }) + ', signed in (test prompt answered; beta reviewer)'); $ready += 'agy'
+    } else {
+      $last = @($probe -split "`n" | Where-Object { $_.Trim() })[-1]
+      Report MISSING agy-login "agy is installed but the test prompt failed (exit $probeCode): $last"; Hint-AgyLogin; $agyUnready = $true
+    }
+  } else {
+    Report OK agy ((FirstLine { agy --version }) + ' (beta reviewer; sign-in not verified, run the check with -Deep)'); $ready += 'agy'
+  }
 } else { Report REVIEWER agy 'not installed (Google Antigravity CLI, beta reviewer)'; Hint-Agy }
 
 if ($Need) {
   foreach ($r in ($Need -split ',')) {
     if ($ready -contains $r) { continue }
-    if ($r -eq 'codex' -and $codexUnready) { $missing += 'codex-login' } else { $missing += $r }
+    if ($r -eq 'codex' -and $codexUnready) { $missing += 'codex-login' }
+    elseif ($r -eq 'agy' -and $agyUnready) { $missing += 'agy-login' }
+    else { $missing += $r }
   }
 } elseif ($ready.Count -eq 0) {
-  if ($codexUnready) { $missing += 'codex-login' } else { $missing += 'reviewer(codex or agy)' }
+  if ($codexUnready) { $missing += 'codex-login' }
+  if ($agyUnready) { $missing += 'agy-login' }
+  if (-not ($codexUnready -or $agyUnready)) { $missing += 'reviewer(codex or agy)' }
 }
 
 # Optional: the CLI for wherever this project is hosted. The review loop only uses local git.

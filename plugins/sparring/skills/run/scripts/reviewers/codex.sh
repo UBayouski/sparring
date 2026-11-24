@@ -13,4 +13,5 @@ command -v codex >/dev/null 2>&1 || { echo "codex CLI not found; run /sparring:c
 
 args=(exec --sandbox read-only --output-schema "$schema" -o "$out" -c "model_reasoning_effort=$effort")
 [[ "$model" != default ]] && args+=(-m "$model")
-codex "${args[@]}" "$(cat "$prompt_file")" >/dev/null
+# exec, so the driver's timeout stops codex itself; stdin closed so codex never waits on it.
+exec codex "${args[@]}" "$(cat "$prompt_file")" >/dev/null </dev/null
