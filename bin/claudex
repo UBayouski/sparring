@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Launch a Claude Code session that runs the claudex-team loop, with the orchestrator model
+# chosen up front (a running session cannot switch its own model from inside a skill).
+#
+#   claudex [--orchestrator MODEL] [--dev M1,M2,M3] [--reviewer M[:effort],...] [--rounds N] "task"
+#
+# Example:
+#   claudex --orchestrator fable --dev sonnet,opus --reviewer default:medium,default:high "add rate limiting to the API"
+set -euo pipefail
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+orchestrator="" opts=()
+while (($#)); do
+  case "$1" in
+    --orchestrator) orchestrator="${2:?--orchestrator needs a model}"; shift 2 ;;
+    --dev)          opts+=("dev=${2:?--dev needs a list}"); shift 2 ;;
+    --reviewer)     opts+=("reviewer=${2:?--reviewer needs a list}"); shift 2 ;;
+    --rounds)       opts+=("rounds=${2:?--rounds needs a number}"); shift 2 ;;
+    -h|--help)      usage 0 ;;
+    --)             shift; break ;;
+    -*)             echo "unknown option: $1" >&2; usage 1 ;;
+    *)              break ;;
+  esac
+done
+(($#)) || { echo "error: no task given" >&2; usage 1; }
+command -v claude >/dev/null 2>&1 || { echo "error: Claude Code not found; see the README's install section" >&2; exit 127; }
+
+[[ -n "$orchestrator" ]] && opts=("orchestrator=$orchestrator" "${opts[@]}")
+prompt="/claudex-team:run ${opts[*]:+${opts[*]} }$*"
+
+if [[ -n "$orchestrator" ]]; then
+  exec claude --model "$orchestrator" "$prompt"
+fi
+exec claude "$prompt"

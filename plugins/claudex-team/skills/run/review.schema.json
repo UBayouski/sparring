@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "issues", "withdrawn"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "changes_requested"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "One or two sentences on the overall state of the change."
+    },
+    "issues": {
+      "type": "array",
+      "description": "Issues that are still open. Empty when approving.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "location", "comment", "suggestion"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable id such as R1. Reuse the same id for the same issue across rounds."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "nit"]
+          },
+          "location": {
+            "type": "string",
+            "description": "File and line, e.g. src/api.ts:42, or 'general'."
+          },
+          "comment": {
+            "type": "string"
+          },
+          "suggestion": {
+            "type": "string",
+            "description": "Concrete fix, or empty string."
+          }
+        }
+      }
+    },
+    "withdrawn": {
+      "type": "array",
+      "description": "Ids of earlier issues that are fixed or that the developer's rebuttal resolved.",
+      "items": { "type": "string" }
+    }
+  }
+}
