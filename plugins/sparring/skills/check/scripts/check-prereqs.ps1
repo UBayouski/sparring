@@ -1,15 +1,17 @@
-# Prerequisite checker and installer for claudex-team (Windows PowerShell 5.1+ and pwsh).
+# Prerequisite checker and installer for sparring (Windows PowerShell 5.1+ and pwsh).
 #
-#   check-prereqs.ps1                    Check everything; print install commands for anything missing.
-#   check-prereqs.ps1 install claude|codex
+#   check-prereqs.ps1 [-Need codex,agy]  Check everything; print install commands for anything missing.
+#                                        -Need: reviewer CLIs that must be ready (default: at least one)
+#   check-prereqs.ps1 install claude|codex|agy
 #                                        Install one tool with the recommended method.
 #
-# Exit codes for the check: 0 = ready, 1 = a required tool is missing or Codex is not signed in.
+# Exit codes for the check: 0 = ready, 1 = something required is missing or not signed in.
 # Run it on its own, before Claude Code is installed:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File plugins\claudex-team\skills\check\scripts\check-prereqs.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File plugins\sparring\skills\check\scripts\check-prereqs.ps1
 param(
   [Parameter(Position = 0)] [string] $Command,
-  [Parameter(Position = 1)] [string] $Tool
+  [Parameter(Position = 1)] [string] $Tool,
+  [string] $Need
 )
 $ErrorActionPreference = 'Continue'
 
@@ -31,6 +33,10 @@ function Hint-ForgeCli([string] $Cli) {
   if ($Cli -eq 'gh') { Write-Output '    winget install --id GitHub.cli' }
   else { Write-Output '    winget install glab.glab' }
   Write-Output "    then: $Cli auth login"
+}
+function Hint-Agy {
+  Write-Output '    irm https://antigravity.google/cli/install.ps1 | iex'
+  Write-Output "    then run 'agy' once to sign in (or use a Gemini API key, see the agy docs)"
 }
 function Hint-CodexLogin {
   Write-Output '    codex login                                   # browser sign-in with ChatGPT'
@@ -60,8 +66,15 @@ if ($Command -eq 'install') {
       Write-Output "Installed: $(FirstLine { codex --version }). Next: sign in with 'codex login'."
       exit 0
     }
+    'agy' {
+      if (Have agy) { Write-Output "agy is already installed: $(FirstLine { agy --version })"; exit 0 }
+      Write-Output '+ irm https://antigravity.google/cli/install.ps1 | iex'
+      try { Invoke-RestMethod https://antigravity.google/cli/install.ps1 | Invoke-Expression } catch { Write-Output $_; exit 1 }
+      Write-Output "Installed. Open a new terminal if 'agy' is not on PATH yet, then run 'agy' once to sign in."
+      exit 0
+    }
     default {
-      Write-Output 'usage: check-prereqs.ps1 install claude|codex'
+      Write-Output 'usage: check-prereqs.ps1 install claude|codex|agy'
       Write-Output 'git is not installed automatically; install it with:'
       Hint-Git
       exit 2
@@ -70,7 +83,7 @@ if ($Command -eq 'install') {
 }
 
 $missing = @()
-Write-Output 'claudex-team prerequisites (windows)'
+Write-Output 'sparring prerequisites (windows)'
 Write-Output ''
 
 if (Have git) { Report OK git (FirstLine { git --version }) }
@@ -79,13 +92,24 @@ else { Report MISSING git 'required'; Hint-Git; $missing += 'git' }
 if (Have claude) { Report OK claude (FirstLine { claude --version }) }
 else { Report MISSING claude 'required (Claude Code, the developer)'; Hint-Claude; $missing += 'claude' }
 
+# Reviewers: each one is ready when installed (and, for codex, signed in).
+$ready = @(); $codexUnready = $false
 if (Have codex) {
-  Report OK codex (FirstLine { codex --version })
   $status = & codex login status 2>&1
-  if ($LASTEXITCODE -eq 0) { Report OK codex-login ("$(@($status)[0])".Trim()) }
-  else { Report MISSING codex-login 'Codex is not signed in'; Hint-CodexLogin; $missing += 'codex-login' }
-} else {
-  Report MISSING codex 'required (Codex CLI, the reviewer)'; Hint-Codex; $missing += 'codex'
+  if ($LASTEXITCODE -eq 0) { Report OK codex ((FirstLine { codex --version }) + ', ' + "$(@($status)[0])".Trim()); $ready += 'codex' }
+  else { Report MISSING codex-login 'Codex is installed but not signed in'; Hint-CodexLogin; $codexUnready = $true }
+} else { Report REVIEWER codex 'not installed (OpenAI Codex CLI)'; Hint-Codex }
+if (Have agy) {
+  Report OK agy ((FirstLine { agy --version }) + " (beta reviewer; run 'agy' once interactively if not signed in)"); $ready += 'agy'
+} else { Report REVIEWER agy 'not installed (Google Antigravity CLI, beta reviewer)'; Hint-Agy }
+
+if ($Need) {
+  foreach ($r in ($Need -split ',')) {
+    if ($ready -contains $r) { continue }
+    if ($r -eq 'codex' -and $codexUnready) { $missing += 'codex-login' } else { $missing += $r }
+  }
+} elseif ($ready.Count -eq 0) {
+  if ($codexUnready) { $missing += 'codex-login' } else { $missing += 'reviewer(codex or agy)' }
 }
 
 # Optional: the CLI for wherever this project is hosted. The review loop only uses local git.
@@ -126,5 +150,7 @@ if (Have git) {
 }
 
 Write-Output ''
-if ($missing.Count -gt 0) { Write-Output "RESULT: missing $($missing -join ' ')"; exit 1 }
+$readyText = if ($ready.Count) { $ready -join ' ' } else { 'none' }
+if ($missing.Count -gt 0) { Write-Output "RESULT: missing $($missing -join ' ')"; Write-Output "READY_REVIEWERS: $readyText"; exit 1 }
 Write-Output 'RESULT: ready'
+Write-Output "READY_REVIEWERS: $readyText"

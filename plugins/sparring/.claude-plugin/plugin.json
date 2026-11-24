@@ -1,0 +1,16 @@
+{
+  "name": "sparring",
+  "description": "Claude Code implements, a reviewer CLI from another vendor (Codex, or Antigravity in beta) reviews, and they loop until approval. The user is asked only when they cannot agree.",
+  "version": "0.2.0",
+  "author": {
+    "name": "YOUR_NAME"
+  },
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "codex",
+    "antigravity",
+    "multi-agent",
+    "workflow"
+  ]
+}

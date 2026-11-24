@@ -1,14 +1,14 @@
 {
-  "name": "claudex-team",
-  "description": "Claude Code as developer, Codex CLI as reviewer, in an autonomous review loop",
+  "name": "sparring",
+  "description": "Claude Code as developer, another vendor's CLI as reviewer, sparring until they agree",
   "owner": {
     "name": "YOUR_NAME"
   },
   "plugins": [
     {
-      "name": "claudex-team",
-      "source": "./plugins/claudex-team",
-      "description": "Claude implements, Codex reviews, and they loop until approved. Asks you only when they cannot agree."
+      "name": "sparring",
+      "source": "./plugins/sparring",
+      "description": "Claude implements, Codex (or Antigravity, beta) reviews, and they loop until approved. Asks you only when they cannot agree."
     }
   ]
 }

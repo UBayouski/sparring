@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Prerequisite checker and installer for claudex-team.
+# Prerequisite checker and installer for sparring.
 #
-#   check-prereqs.sh            Check everything; print install commands for anything missing.
-#   check-prereqs.sh install claude|codex
+#   check-prereqs.sh [--need codex,agy]
+#                               Check everything; print install commands for anything missing.
+#                               --need: reviewer CLIs that must be ready (default: at least one)
+#   check-prereqs.sh install claude|codex|agy
 #                               Install one tool with the recommended method for this machine.
 #
-# Exit codes for the check: 0 = ready, 1 = a required tool is missing or Codex is not signed in.
+# Exit codes for the check: 0 = ready, 1 = something required is missing or not signed in.
 # The script can also be run on its own, before Claude Code is installed:
-#   bash plugins/claudex-team/skills/check/scripts/check-prereqs.sh
+#   bash plugins/sparring/skills/check/scripts/check-prereqs.sh
 set -uo pipefail
 
 OS="$(uname -s 2>/dev/null || echo unknown)"
@@ -65,6 +67,14 @@ hint_forge_cli() {  # gh | glab
   echo "    then: $1 auth login"
 }
 
+hint_agy() {
+  case "$PLATFORM" in
+    windows) echo "    irm https://antigravity.google/cli/install.ps1 | iex      # PowerShell" ;;
+    *)       echo "    curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
+  esac
+  echo "    then run 'agy' once to sign in (or use a Gemini API key, see the agy docs)"
+}
+
 hint_codex_login() {
   echo "    codex login                                        # browser sign-in with ChatGPT"
   echo "    codex login --device-auth                          # headless / remote machines"
@@ -115,13 +125,24 @@ install_tool() {
       fi
       echo "Installed: $(ver codex --version). Next: sign in with 'codex login'."
       ;;
+    agy)
+      if have agy; then echo "agy is already installed: $(ver agy --version)"; return 0; fi
+      [[ "$PLATFORM" == windows ]] && { echo "On Windows run in PowerShell:  irm https://antigravity.google/cli/install.ps1 | iex"; return 2; }
+      have curl || { echo "curl is required for the agy installer"; return 2; }
+      echo "+ curl -fsSL https://antigravity.google/cli/install.sh | bash"
+      curl -fsSL https://antigravity.google/cli/install.sh | bash || return 1
+      echo "Installed. Open a new terminal if 'agy' is not on PATH yet, then run 'agy' once to sign in."
+      ;;
     *)
-      echo "usage: $0 install claude|codex"
+      echo "usage: $0 install claude|codex|agy"
       echo "git is not installed automatically because it needs sudo or a system installer:"
       hint_git
       return 2 ;;
   esac
 }
+
+need=""
+if [[ "${1:-}" == --need ]]; then need="${2:-}"; shift 2 || true; fi
 
 if [[ "${1:-}" == install ]]; then
   install_tool "${2:-}"
@@ -133,7 +154,7 @@ fi
 missing=()
 report() { printf '%-9s %-14s %s\n' "$1" "$2" "$3"; }
 
-echo "claudex-team prerequisites ($PLATFORM)"
+echo "sparring prerequisites ($PLATFORM)"
 echo
 
 if have git; then report OK git "$(ver git --version)"
@@ -142,15 +163,34 @@ else report MISSING git "required"; hint_git; missing+=(git); fi
 if have claude; then report OK claude "$(ver claude --version)"
 else report MISSING claude "required (Claude Code, the developer)"; hint_claude; missing+=(claude); fi
 
+# Reviewers: each one is "ready" when installed (and, for codex, signed in).
+ready_reviewers=()
 if have codex; then
-  report OK codex "$(ver codex --version)"
   if codex login status >/dev/null 2>&1; then
-    report OK codex-login "$(ver codex login status)"
+    report OK codex "$(ver codex --version), $(ver codex login status)"; ready_reviewers+=(codex)
   else
-    report MISSING codex-login "Codex is not signed in"; hint_codex_login; missing+=(codex-login)
+    report MISSING codex-login "Codex is installed but not signed in"; hint_codex_login
+    codex_unready=1
   fi
 else
-  report MISSING codex "required (Codex CLI, the reviewer)"; hint_codex; missing+=(codex)
+  report REVIEWER codex "not installed (OpenAI Codex CLI)"; hint_codex
+fi
+if have agy; then
+  # agy has no sign-in status command; headless runs fail with "authentication required" if needed.
+  report OK agy "$(ver agy --version) (beta reviewer; run 'agy' once interactively if not signed in)"
+  ready_reviewers+=(agy)
+else
+  report REVIEWER agy "not installed (Google Antigravity CLI, beta reviewer)"; hint_agy
+fi
+
+if [[ -n "$need" ]]; then
+  IFS=, read -r -a needed <<< "$need"
+  for r in "${needed[@]}"; do
+    [[ " ${ready_reviewers[*]:-} " == *" $r "* ]] && continue
+    if [[ "$r" == codex && -n "${codex_unready:-}" ]]; then missing+=(codex-login); else missing+=("$r"); fi
+  done
+elif ((${#ready_reviewers[@]} == 0)); then
+  if [[ -n "${codex_unready:-}" ]]; then missing+=(codex-login); else missing+=("reviewer(codex or agy)"); fi
 fi
 
 # Optional: the CLI for wherever this project is hosted. The review loop itself only uses
@@ -192,6 +232,8 @@ fi
 echo
 if ((${#missing[@]})); then
   echo "RESULT: missing ${missing[*]}"
+  echo "READY_REVIEWERS: ${ready_reviewers[*]:-none}"
   exit 1
 fi
 echo "RESULT: ready"
+echo "READY_REVIEWERS: ${ready_reviewers[*]}"

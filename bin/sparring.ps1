@@ -1,14 +1,16 @@
-# Launch a Claude Code session that runs the claudex-team loop, with the orchestrator model
+# Launch a Claude Code session that runs the sparring loop, with the orchestrator model
 # chosen up front (a running session cannot switch its own model from inside a skill).
 #
-#   claudex.ps1 [-Orchestrator MODEL] [-Dev M1,M2,M3] [-Reviewer M[:effort],...] [-Rounds N] "task"
+#   sparring.ps1 [-Orchestrator MODEL] [-Dev M1,M2,M3] [-Reviewer tool/model:effort,...]
+#                [-Tiebreaker tool/model:effort] [-Rounds N] "task"
 #
 # Example:
-#   .\claudex.ps1 -Orchestrator fable -Dev sonnet,opus -Reviewer default:medium,default:high "add rate limiting to the API"
+#   .\sparring.ps1 -Orchestrator fable -Dev sonnet,opus -Reviewer codex/default:medium,codex/default:high -Tiebreaker agy/default:high "add rate limiting to the API"
 param(
   [string] $Orchestrator,
   [string[]] $Dev,
   [string[]] $Reviewer,
+  [string] $Tiebreaker,
   [int] $Rounds,
   [Parameter(Position = 0, ValueFromRemainingArguments = $true)] [string[]] $Task
 )
@@ -19,8 +21,9 @@ $opts = @()
 if ($Orchestrator) { $opts += "orchestrator=$Orchestrator" }
 if ($Dev)          { $opts += "dev=$($Dev -join ',')" }
 if ($Reviewer)     { $opts += "reviewer=$($Reviewer -join ',')" }
+if ($Tiebreaker)   { $opts += "tiebreaker=$Tiebreaker" }
 if ($Rounds)       { $opts += "rounds=$Rounds" }
-$prompt = (@('/claudex-team:run') + $opts + $Task) -join ' '
+$prompt = (@('/sparring:run') + $opts + $Task) -join ' '
 # Windows PowerShell before 7 drops embedded double quotes when calling native programs.
 if ($PSVersionTable.PSVersion.Major -lt 7) { $prompt = $prompt -replace '"', "'" }
 
