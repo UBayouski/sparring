@@ -2,9 +2,19 @@
 # Reviewer adapter: Google Antigravity CLI (agy). Beta.
 # Contract: <adapter> <model|default> <effort> <schema-file> <out-file> <prompt-file>
 #
-# agy has no read-only sandbox like Codex, so this runs in plan mode with the terminal
-# sandbox on, and the driver rejects the review if any file changed.
+# agy has no read-only sandbox like Codex, so this runs in plan mode (read-only) with the terminal
+# sandbox on, and the driver rejects the review if any file changed. With
+# SPARRING_ALLOW_COMMANDS=1 (reviewer agy+run) the driver has started it inside a disposable
+# copy of the project, so it runs in agy's default mode and may run tests there.
 set -euo pipefail
+
+# --meta <log-file>: print what this adapter logged about the run (see codex.sh). agy's
+# envelope reports tokens but not the model, so only tokens= is printed.
+if [[ "${1:-}" == --meta ]]; then
+  sed -n 's/^sparring-meta: //p' "$2" | tr -d '\r'
+  exit 0
+fi
+
 model="$1" effort="$2" schema="$3" out="$4" prompt_file="$5"
 
 # The Windows agy installer only updates PATH for new terminals; find a fresh install anyway.
@@ -17,15 +27,44 @@ command -v agy >/dev/null 2>&1 || { echo "agy CLI not found; run /sparring:check
 # agy efforts: low, medium, high, xhigh, max (model dependent). Map "minimal" to low.
 [[ "$effort" == minimal ]] && effort=low
 
+# Plan mode keeps agy read-only, but in agy 1.5 it also denies every shell command (allow
+# rules are ignored there), and a denied command ends the turn with no verdict. So agy is
+# told up front to work from the files only. If it asks for a command anyway, it gets one
+# retry with a stricter note. Outside plan mode agy can write files, so that is not an option.
+NO_COMMANDS='Important for this reviewer: shell commands are not available here, so ignore the earlier permission to run tests or linters. Asking for any command ends the review with no result. Use only your file reading tools, and say in summary what you could not verify without running code.'
+RETRY_NOTE='Your previous attempt asked for a shell command and was stopped. Do not request any command or tool that runs code. Read the files and return the verdict.'
+
 # Stop agy a little before the driver's watchdog does, so it can exit cleanly.
 limit="${SPARRING_REVIEW_TIMEOUT:-540}"
 ((limit > 60)) && limit=$((limit - 15))
-args=(-p "$(cat "$prompt_file")" --output-format json --json-schema "$schema"
-      --mode plan --sandbox --effort "$effort" --print-timeout "${SPARRING_AGY_TIMEOUT:-${limit}s}")
-[[ "$model" != default ]] && args+=(--model "$model")
+started=$SECONDS
 
-envelope="$(agy "${args[@]}" </dev/null)"
+allow_commands=0; [[ "${SPARRING_ALLOW_COMMANDS:-0}" == 1 ]] && allow_commands=1
+
+run_agy() {  # <prompt> <timeout-seconds>
+  local a=(-p "$1" --output-format json --json-schema "$schema"
+           --sandbox --effort "$effort" --print-timeout "${SPARRING_AGY_TIMEOUT:-${2}s}")
+  ((allow_commands)) || a+=(--mode plan)
+  [[ "$model" != default ]] && a+=(--model "$model")
+  agy "${a[@]}" </dev/null
+}
+tokens_of() { grep -o '"total_tokens": *[0-9]*' <<< "$1" | head -n 1 | grep -o '[0-9]*$' || true; }
+
+prompt="$(cat "$prompt_file")"
+((allow_commands)) || prompt+=$'\n\n'"$NO_COMMANDS"
+envelope="$(run_agy "$prompt" "$limit")"
 [[ -n "$envelope" ]] || { echo "agy returned no output (older agy versions drop output when not run in a terminal; update agy)" >&2; exit 4; }
+attempts=1 total="$(tokens_of "$envelope")"
+
+left=$((limit - (SECONDS - started)))
+if ((!allow_commands)) && ! grep -q '"structured_output"' <<< "$envelope" && grep -q '"denied_actions":.*"command"' <<< "$envelope" && ((left >= 60)); then
+  echo "agy asked for a shell command, which plan mode denies; retrying once without commands" >&2
+  envelope="$(run_agy "$prompt"$'\n\n'"$RETRY_NOTE" "$left")" || true
+  attempts=2
+  t="$(tokens_of "$envelope")"; [[ -n "$t" ]] && total=$(( ${total:-0} + t ))
+fi
+[[ -n "$total" ]] && echo "sparring-meta: tokens=$total" >&2
+echo "sparring-meta: attempts=$attempts" >&2
 
 # The verdict is in the envelope's structured_output field. Use whichever JSON tool exists.
 extract() {
@@ -39,7 +78,7 @@ extract() {
     cat   # no JSON tool: keep the whole envelope; the orchestrator reads structured_output itself
   fi
 }
-if ! printf '%s' "$envelope" | extract > "$out"; then
+if [[ -z "$envelope" ]] || ! printf '%s' "$envelope" | extract > "$out"; then
   echo "agy envelope has no structured_output:" >&2
   printf '%s\n' "$envelope" >&2
   exit 4

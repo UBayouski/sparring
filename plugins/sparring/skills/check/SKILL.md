@@ -28,8 +28,9 @@ For each missing item it shows the real install commands for this machine.
 ## 2. Report
 
 If the result is ready, say so in one line, listing the versions found and which reviewers
-are ready, and stop. Mention optional items (`OPTIONAL`, `REVIEWER`) only in a short second
-line.
+are ready, and stop. Mention optional items (`OPTIONAL`, `REVIEWER`) and any `NOTE` only in a
+short second line. End with the `NEXT:` line's point: only the user can start the loop, by
+typing `/sparring:run <task>`; you cannot start it yourself.
 
 Otherwise show the user each missing item with its install commands, exactly as printed.
 

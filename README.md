@@ -87,6 +87,31 @@ the first entry for fast, the middle one for standard, the last one for deep. It
 tier when a round makes no progress, and never uses a model or tool outside your lists.
 You can mix vendors in `reviewer=` too, for example `codex/default:medium,agy/default:high`.
 
+### Reviewers that run your tests
+
+| Reviewer | Reads the code | Runs tests | How it stays out of your files |
+|---|---|---|---|
+| `codex` | yes | yes | Codex's own read-only sandbox |
+| `agy` | yes | no | `agy`'s plan mode, which is read-only but also blocks every command |
+| `agy+run` | yes | yes | It works in a throwaway copy of the project, deleted afterwards |
+
+`agy+run` (for example `tiebreaker=agy+run/default:high`) runs `agy` in its normal mode, where
+it can run commands, inside a copy made for each review: a `git clone --shared` of your repo
+at HEAD with your uncommitted changes applied. Nothing it changes there reaches your working
+tree, branches or git config, and your real tree is still checked after the review.
+Know the limits before you use it:
+
+- **Not a sandbox.** `agy`'s `--sandbox` flag did not stop writes outside the folder it runs
+  in when we tested `agy` 1.5. Code it runs, including your tests, can touch anything your
+  user account can. Use it on projects whose tests you trust.
+- **Ignored files are not copied.** `node_modules`, virtualenvs, build output and `.env` files
+  stay behind, so tests that need them may not run; the review then says so. Submodules are
+  not checked out.
+- **Slower.** Each review makes a fresh copy first.
+- **Your machine's tools.** It runs what `agy` can start. On Windows, the Microsoft Store
+  `python` alias could not be started from `agy` in our tests; a regular Python install avoids
+  that.
+
 A running session can't switch its own model, so to pick the orchestrator use the launcher.
 It starts a new session on that model and passes your options through:
 
@@ -111,7 +136,8 @@ To use it from anywhere, put it on your PATH, e.g.
 3. The reviewer reads the task and the diff and returns JSON that matches
    `review.schema.json`: a verdict, plus issues marked `blocking` or `nit`, with stable ids.
    - Codex runs in its **read-only sandbox**.
-   - Antigravity runs in **plan mode with its terminal sandbox on**.
+   - Antigravity runs in **plan mode with its terminal sandbox on**, told not to run
+     commands, or, as `agy+run`, in a throwaway copy of the project (see above).
    - For both, the driver fingerprints the working tree before and after, and **rejects the
      review if any file changed**. Just before the reviewer runs, it also saves the tree as
      a git tree object (no commit, no ref, the index untouched). `review.sh restore <round>`
@@ -129,7 +155,9 @@ To use it from anywhere, put it on your PATH, e.g.
    models. Then, if you set one, the tiebreaker judges each disputed issue and two of three
    decide. Anything still open comes to you as one question per issue, with every position.
 6. Nothing is committed or pushed. You get a summary, and every round is saved in
-   `.sparring/` (diff, prompt, review JSON, response, reviewer log).
+   `.sparring/` (diff, prompt, review JSON, response, reviewer log). `.sparring/reviews.tsv`
+   has one line per reviewer call, retries and failures included: the model that actually
+   ran (when the CLI reports it), effort, seconds, tokens and the result.
 
 Steps 3–5 are driven by `review.sh status` (see below), not by the orchestrator's memory.
 
@@ -204,20 +232,31 @@ Each reviewer is one adapter in `plugins/sparring/skills/run/scripts/reviewers/`
 
 ```
 <adapter> <model|default> <effort> <schema-file> <out-file> <prompt-file>
+<adapter> --meta <log-file>
 ```
 
 The adapter writes a JSON verdict matching `<schema-file>` to `<out-file>`, sends logs to
-stderr, and exits 0. The driver handles the diff, the prompt, the tree check and errors. Add
-the tool to `check-prereqs` so `--need <tool>` works.
+stderr, and exits 0. The driver handles the diff, the prompt, the tree check and errors. With
+`--meta`, it prints what its CLI reported in that log as `model=`, `tokens=` and `attempts=`
+lines, any of which may be missing; the driver records them in `reviews.tsv`. When
+`SPARRING_ALLOW_COMMANDS=1` is set, the driver has started it in a throwaway copy for
+`<tool>+run`, so it may let its CLI run commands. Add the tool to `check-prereqs` so
+`--need <tool>` works.
 
 ## Status
 
 - **Codex reviewer:** stable.
-- **Antigravity reviewer:** beta. Older `agy` versions printed nothing when not run in a real
-  terminal; if a review comes back empty, update `agy`.
-- **PowerShell scripts:** smoke-tested on Windows PowerShell 5.1 with fake reviewers
-  (`tests/run-tests.ps1`), including non-ASCII file names and content. Not yet run against
-  the real CLIs on Windows. Reports welcome.
+- **Antigravity reviewer:** beta. It runs in `agy`'s plan mode, the only mode that keeps it
+  read-only, and in `agy` 1.5 plan mode denies every shell command. So an `agy` review reads
+  the diff and files but cannot run your tests, and its summary says what it could not
+  verify. If it asks for a command anyway, it is retried once without commands. Codex reviews
+  can run tests in its read-only sandbox, and `agy+run` runs them in a throwaway copy (see
+  [Reviewers that run your tests](#reviewers-that-run-your-tests)). Older `agy` versions
+  printed nothing when not run in a real terminal; if a review comes back empty, update `agy`.
+- **Windows:** both drivers have reviewed real changes on Windows 11 with `agy` 1.5.16
+  (plain and `+run`, from Git Bash and Windows PowerShell 5.1) and Codex 0.171.0 (from Git
+  Bash). The smoke tests (`tests/run-tests.{sh,ps1}`) use fake reviewers and cover non-ASCII
+  file names and content. Reports from macOS and Linux welcome.
 
 ## Layout
 

@@ -26,6 +26,7 @@ printf '%s\n' "\$@" > "\$FAKE_ARGS"
 [[ -n "\${FAKE_CREATE:-}" ]] && echo created > "\$FAKE_CREATE"
 [[ -n "\${FAKE_DELETE:-}" ]] && rm -f "\$FAKE_DELETE"
 [[ -n "\${FAKE_SLEEP:-}" ]] && sleep "\$FAKE_SLEEP"
+echo "model: gpt-fake" >&2; printf 'tokens used\n1,234\n' >&2   # what codex exec logs
 out=""; while ((\$#)); do [[ "\$1" == -o ]] && out="\$2"; shift; done
 if [[ -n "\${FAKE_REVIEW:-}" ]]; then printf '%s\n' "\$FAKE_REVIEW" > "\$out"
 elif [[ "\$out" == *round-1.review* ]]; then echo '$CHANGES' > "\$out"; else echo '$APPROVE' > "\$out"; fi
@@ -36,6 +37,19 @@ cat > "$T/bin/agy" <<EOF
 [[ "\${1:-}" == --version ]] && { echo "agy 1.2.4-fake"; exit 0; }
 [[ "\${2:-}" == "Reply with only the word ok."* ]] && { echo "\${FAKE_AGY_PROBE-ok}"; exit "\${FAKE_AGY_PROBE_EXIT:-0}"; }
 printf '%s\n' "\$@" > "\$FAKE_ARGS"
+# Where it ran, and what that folder held: a.py's last line, new_file.py, b.py (for +run).
+pwd -P > "\$FAKE_ARGS.cwd"
+printf '%s|%s|%s' "\$(tail -n 1 a.py 2>/dev/null)" "\$([[ -f new_file.py ]] && echo new)" "\$([[ -f b.py ]] && echo b)" > "\$FAKE_ARGS.copy"
+[[ -n "\${FAKE_AGY_TOUCH:-}" ]] && echo touched >> "\$FAKE_AGY_TOUCH"
+# FAKE_AGY_DENY=<counter file>: the first FAKE_AGY_DENY_TIMES calls (default 1) ask for a
+# shell command, which plan mode denies, so they return no verdict.
+if [[ -n "\${FAKE_AGY_DENY:-}" ]]; then
+  n="\$(cat "\$FAKE_AGY_DENY" 2>/dev/null || echo 0)"; echo "\$((n + 1))" > "\$FAKE_AGY_DENY"
+  if ((n < \${FAKE_AGY_DENY_TIMES:-1})); then
+    echo '{"status":"SUCCESS","response":"","usage":{"total_tokens":5},"denied_actions":[{"action":"command","display_name":"Bash"}]}'
+    exit 0
+  fi
+fi
 echo '{"status":"SUCCESS","response":"...","structured_output":$APPROVE,"usage":{"total_tokens":1}}'
 EOF
 chmod +x "$T/bin/codex" "$T/bin/agy"
@@ -63,6 +77,11 @@ out="$(FAKE_AGY_PROBE="Error: authentication required" FAKE_AGY_PROBE_EXIT=1 "$C
 check "deep: agy not signed in fails"      '[[ $code -eq 1 && "$out" == *"missing agy-login"* && "$out" == *"authentication required"* ]]'
 out="$(FAKE_AGY_PROBE="no token" "$CHECK" --deep --need agy </dev/null)"; code=$?
 check "deep: an answer other than ok fails" '[[ $code -eq 1 && "$out" == *"missing agy-login"* ]]'
+check "ready says only the user starts run" '[[ "$("$CHECK" </dev/null)" == *"NEXT: only the user"* ]]'
+out="$(FAKE_AGY_PROBE_EXIT=1 FAKE_AGY_PROBE="auth required" "$REVIEW" init codex,agy </dev/null 2>&1)"; code=$?
+check "init with agy checks its sign-in"   '[[ $code -eq 5 && "$out" == *"missing agy-login"* ]]'
+out="$(FAKE_AGY_PROBE_EXIT=1 "$REVIEW" init codex </dev/null 2>&1)"; code=$?
+check "init without agy skips that check"  '[[ $code -eq 0 ]]'
 
 echo "review.sh with codex"
 out="$("$REVIEW" init codex,agy </dev/null 2>&1)"
@@ -100,6 +119,44 @@ check "agy model passed"                   'grep -qx gemini-x "$FAKE_ARGS"'
 check "tiebreak prompt"                    'grep -q "independent THIRD reviewer" .sparring/round-1.tiebreak.prompt.txt'
 check "tiebreak sees the rebuttals"        'grep -q "rebuttals, by issue id, are in .sparring/round-1.response.md" .sparring/round-1.tiebreak.prompt.txt'
 check "tiebreak saved separately"          '[[ -s .sparring/round-1.tiebreak.review.json ]]'
+check "agy is told not to run commands"    'grep -q "shell commands are not available here" "$FAKE_ARGS"'
+
+echo "reviews.tsv"
+check "has a header"                       '[[ "$(head -n 1 .sparring/reviews.tsv)" == $'"'"'round\tkind\ttool\tmodel\teffort\tseconds\ttokens\tattempts\tresult'"'"' ]]'
+check "codex: model and tokens from its log" 'grep -qP "^1\treview\tcodex\tgpt-fake\tmedium\t[0-9]+\t1234\t1\tok$" .sparring/reviews.tsv'
+check "every call is a line"               '[[ $(grep -c . .sparring/reviews.tsv) -eq 6 ]]'
+check "agy: requested model, its tokens"   'grep -qP "^1\ttiebreak\tagy\tgemini-x\tminimal\t[0-9]+\t1\t1\tok$" .sparring/reviews.tsv'
+out="$("$REVIEW" review 2 codex default medium .sparring/round-1.response.md 2>&1 >/dev/null </dev/null)"
+check "prints a reviewer line"             '[[ "$out" == *"reviewer: codex, model gpt-fake, effort medium"*"tokens 1234, ok"* ]]'
+
+echo "agy asking for a shell command"
+rm -f "$T/deny"
+out="$(FAKE_AGY_DENY="$T/deny" "$REVIEW" review --tiebreak 1 agy default low .sparring/round-1.response.md 2>&1 </dev/null)"; code=$?
+check "retried once, then a verdict"       '[[ $code -eq 0 && "$(cat "$T/deny")" == 2 ]] && grep -q "retrying once without commands" .sparring/round-1.tiebreak.agy.log'
+check "the retry is told why"              'grep -q "previous attempt asked for a shell command" "$FAKE_ARGS"'
+check "attempts and summed tokens recorded" 'tail -n 1 .sparring/reviews.tsv | grep -qP "\tagy\tdefault\tlow\t[0-9]+\t6\t2\tok$"'
+check "reviewer line shows the retry"      '[[ "$out" == *"tokens 6, 2 attempts, ok"* ]]'
+rm -f "$T/deny"
+out="$(FAKE_AGY_DENY="$T/deny" FAKE_AGY_DENY_TIMES=9 "$REVIEW" review --tiebreak 1 agy default low .sparring/round-1.response.md 2>&1 </dev/null)"; code=$?
+check "denied twice: fails, no third try"  '[[ $code -eq 4 && "$(cat "$T/deny")" == 2 ]]'
+check "the failure is recorded"            'tail -n 1 .sparring/reviews.tsv | grep -qP "\t2\tfailed$"'
+"$REVIEW" review --tiebreak 1 agy gemini-x minimal .sparring/round-1.response.md </dev/null >/dev/null   # put the tiebreak back
+
+echo "agy+run (disposable copy)"
+rm b.py   # a deleted tracked file must be missing in the copy too
+out="$(FAKE_AGY_TOUCH=a.py "$REVIEW" review --tiebreak 1 agy+run default low .sparring/round-1.response.md 2>&1 </dev/null)"; code=$?
+git checkout -q -- b.py
+copy_dir="$(cat "$FAKE_ARGS.cwd")"
+check "+run: verdict, real tree untouched" '[[ $code -eq 0 && "$(tail -n 1 a.py)" != touched ]]'
+check "+run: ran in a copy, not the project" '[[ "$copy_dir" != "$(pwd -P)" && "$copy_dir" == */sparring-copy.*/project ]]'
+check "+run: copy had the developer's files" '[[ "$(cat "$FAKE_ARGS.copy")" == "y = 2|new|" ]]'
+check "+run: no plan mode, no no-commands note" '! grep -qx plan "$FAKE_ARGS" && ! grep -q "shell commands are not available" "$FAKE_ARGS"'
+check "+run: prompt says it is a copy"     'grep -q "disposable copy of the project" .sparring/round-1.tiebreak.prompt.txt'
+check "+run: copy removed afterwards"      '[[ -n "$copy_dir" && ! -d "$copy_dir" ]]'
+check "+run: recorded as agy+run"          'tail -n 1 .sparring/reviews.tsv | grep -qP "^1\ttiebreak\tagy\+run\tdefault\tlow\t"'
+"$REVIEW" review 1 agy default low </dev/null >/dev/null
+check "plain agy still in the project, plan mode" '[[ "$(cat "$FAKE_ARGS.cwd")" == "$(pwd -P)" ]] && grep -qx plan "$FAKE_ARGS"'
+"$REVIEW" review 1 codex default medium </dev/null >/dev/null   # put round 1 back
 
 echo "safety"
 before_a="$(cat a.py)"
@@ -168,8 +225,10 @@ check "no changes exits 3"                 '[[ $code -eq 3 ]]'
 check "index left clean"                   '[[ -z "$(git status --porcelain)" ]]'
 
 echo "new run"
-out="$("$REVIEW" init codex </dev/null 2>&1)"
+out="$("$REVIEW" init codex,agy+run </dev/null 2>&1)"; code=$?
+check "init accepts agy+run"               '[[ $code -eq 0 ]]'
 check "init moves the old run aside"       '[[ "$out" == *"previous run moved"* && -f .sparring/previous/round-1.review.json ]]'
+check "init moves reviews.tsv aside too"   '[[ -f .sparring/previous/reviews.tsv && ! -f .sparring/reviews.tsv ]]'
 check "init leaves no stale rounds"        '! compgen -G ".sparring/round-*" >/dev/null && [[ ! -f .sparring/task.md ]]'
 
 echo "status"

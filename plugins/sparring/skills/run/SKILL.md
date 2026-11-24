@@ -27,6 +27,9 @@ Read leading `key=value` options; everything else is the task.
 | `rounds=` | Review rounds before deadlock handling | `3` |
 
 Reviewer tools: `codex` (OpenAI Codex CLI) and `agy` (Google Antigravity CLI, beta).
+`agy` reviews read-only and cannot run commands. `agy+run` reviews in a disposable copy of
+the project where it may run tests; pass it to `REVIEW review` as the tool, exactly as
+written. Codex runs tests in its own read-only sandbox, so it needs no `+run`.
 **Use only models and tools from these lists**, including in escalation.
 
 **Orchestrator.** If `orchestrator=` is set and you are not that model, you cannot switch
@@ -65,7 +68,7 @@ read its output. If it times out again, tell the user and stop.
 
 1. Run `REVIEW init <tools> --rounds <rounds>`, adding `--tiebreaker` when `tiebreaker=` is
    set. `<tools>` is the comma-separated set of reviewer tools in `reviewer=` and
-   `tiebreaker=` (for example `codex` or `codex,agy`). It checks those are ready, and saves
+   `tiebreaker=` (for example `codex`, `codex,agy` or `codex,agy+run`). It checks those are ready, and saves
    the round limit and the tiebreaker setting for `REVIEW status`.
    - If it reports missing prerequisites, run the `sparring:check` skill to fix them, then
      run the same `REVIEW init` again. Stop if they are still missing.
@@ -172,7 +175,11 @@ user.
 
 Do not commit or push unless the task asked for it. Report briefly:
 - Result: approved, approved after tiebreak or user decisions, or stopped (and why)
-- Orchestrator model, and each round's developer model and reviewer tool/model/effort
+- Orchestrator model, and each round's developer model and reviewer tool/model/effort. Take
+  the reviewer side from `.sparring/reviews.tsv`: one line per reviewer call (retries and
+  failures too) with round, kind, tool, the model that actually ran (as the CLI reported it,
+  otherwise the one requested), effort, seconds, tokens (`-` when the CLI does not report
+  them) and result. Give the total reviewer time and tokens.
 - Files changed and test status
 - Nits left unaddressed (one line each)
 - Any tiebreaker or user decisions, and where the round files are (`.sparring/`; the run

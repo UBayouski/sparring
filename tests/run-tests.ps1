@@ -29,6 +29,8 @@ if (`$env:FAKE_TOUCH) { Add-Content -Path `$env:FAKE_TOUCH -Value 'touched' }
 if (`$env:FAKE_CREATE) { Set-Content -Path `$env:FAKE_CREATE -Value 'created' }
 if (`$env:FAKE_DELETE) { Remove-Item -Force -LiteralPath `$env:FAKE_DELETE }
 if (`$env:FAKE_SLEEP) { Start-Sleep -Seconds ([int] `$env:FAKE_SLEEP) }
+# What codex exec logs: the model in its header, then the token count.
+[Console]::Error.WriteLine('model: gpt-fake'); [Console]::Error.WriteLine('tokens used'); [Console]::Error.WriteLine('1,234')
 for (`$i = 0; `$i -lt `$a.Count; `$i++) { if (`$a[`$i] -eq '-o') { `$out = `$a[`$i + 1] } }
 if (`$env:FAKE_REVIEW) { `$json = `$env:FAKE_REVIEW }
 elseif (`$out -like '*round-1.review*') { `$json = '$changes' } else { `$json = '$approve' }
@@ -45,6 +47,22 @@ if (`$a[1] -like 'Reply with only the word ok.*') {
   if (`$env:FAKE_AGY_PROBE_EXIT) { exit [int] `$env:FAKE_AGY_PROBE_EXIT } else { exit 0 }
 }
 `$a | Set-Content -Encoding utf8 `$env:FAKE_ARGS
+# Where it ran, and what that folder held (for +run): a.py's bytes, with space.py, b.py.
+(Get-Location).Path | Set-Content -Encoding utf8 "`$env:FAKE_ARGS.cwd"
+`$aHash = if (Test-Path a.py) { (Get-FileHash a.py).Hash } else { '' }
+"`$aHash|`$(Test-Path 'with space.py')|`$(Test-Path b.py)" | Set-Content -Encoding utf8 "`$env:FAKE_ARGS.copy"
+if (`$env:FAKE_AGY_TOUCH) { Add-Content -Path `$env:FAKE_AGY_TOUCH -Value 'touched' }
+# FAKE_AGY_DENY=<counter file>: the first FAKE_AGY_DENY_TIMES calls (default 1) ask for a
+# shell command, which plan mode denies, so they return no verdict.
+if (`$env:FAKE_AGY_DENY) {
+  `$n = if (Test-Path `$env:FAKE_AGY_DENY) { [int] (Get-Content `$env:FAKE_AGY_DENY) } else { 0 }
+  Set-Content -Path `$env:FAKE_AGY_DENY -Value (`$n + 1)
+  `$times = if (`$env:FAKE_AGY_DENY_TIMES) { [int] `$env:FAKE_AGY_DENY_TIMES } else { 1 }
+  if (`$n -lt `$times) {
+    '{"status":"SUCCESS","response":"","usage":{"total_tokens":5},"denied_actions":[{"action":"command","display_name":"Bash"}]}'
+    exit 0
+  }
+}
 '{"status":"SUCCESS","response":"...","structured_output":$approve,"usage":{"total_tokens":1}}'
 exit 0
 "@ | Set-Content -Encoding ascii "$T\bin\agy.ps1"
@@ -86,7 +104,14 @@ try {
   $env:FAKE_AGY_PROBE = 'no token'; Remove-Item Env:FAKE_AGY_PROBE_EXIT
   $out = Invoke-Check -Deep -Need agy
   Test-That 'deep: an answer other than ok fails' ($code -eq 1 -and $out -match 'missing agy-login')
-  Remove-Item Env:FAKE_AGY_PROBE
+  $env:FAKE_AGY_PROBE_EXIT = '1'
+  $out = Invoke-RevErr init codex,agy
+  Test-That 'init with agy checks its sign-in' ($code -eq 5 -and $out -match 'missing agy-login')
+  $null = Invoke-RevErr init codex
+  Test-That 'init without agy skips that check' ($code -eq 0)
+  Remove-Item Env:FAKE_AGY_PROBE, Env:FAKE_AGY_PROBE_EXIT
+  $out = Invoke-Check
+  Test-That 'ready says only the user starts run' ($out -match 'NEXT: only the user')
 
   'review.ps1 with codex'
   $out = Invoke-Rev init codex,agy
@@ -129,6 +154,54 @@ try {
   Test-That 'minimal maps to low for agy' ($fa -contains 'low')
   Test-That 'agy timeout follows the driver' ($fa -contains '525s')
   Test-That 'tiebreak saved separately' (Test-Path .sparring\round-1.tiebreak.review.json)
+
+  'reviews.tsv'
+  $tsv = @(Get-Content .sparring\reviews.tsv)
+  Test-That 'has a header' ($tsv[0] -eq "round`tkind`ttool`tmodel`teffort`tseconds`ttokens`tattempts`tresult")
+  Test-That 'codex: model and tokens from its log' ($tsv[1] -match "^1`treview`tcodex`tgpt-fake`tmedium`t\d+`t1234`t1`tok$")
+  Test-That 'every call is a line' ($tsv.Count -eq 5)
+  Test-That 'agy: requested model, its tokens' ($tsv[4] -match "^1`ttiebreak`tagy`tgemini-x`tminimal`t\d+`t1`t1`tok$")
+  $out = Invoke-RevErr review 2 codex default medium .sparring\round-1.response.md
+  Test-That 'prints a reviewer line' ($out -match 'reviewer: codex, model gpt-fake, effort medium, \d+s, tokens 1234, ok')
+
+  'agy asking for a shell command'
+  $deny = "$T\deny.txt"
+  Remove-Item -Force -ErrorAction SilentlyContinue $deny
+  $env:FAKE_AGY_DENY = $deny
+  $out = Invoke-RevErr review --tiebreak 1 agy default low .sparring\round-1.response.md
+  $log = Get-Content -Raw .sparring\round-1.tiebreak.agy.log
+  Test-That 'agy is told not to run commands' ((Get-FakeArgs) -join ' ' -match 'shell commands are not available here')
+  Test-That 'retried once, then a verdict' ($code -eq 0 -and (Get-Content $deny) -eq '2' -and $log -match 'retrying once without commands')
+  Test-That 'the retry is told why' ((Get-FakeArgs) -join ' ' -match 'previous attempt asked for a shell command')
+  Test-That 'attempts and summed tokens recorded' ((Get-Content .sparring\reviews.tsv)[-1] -match "`tagy`tdefault`tlow`t\d+`t6`t2`tok$")
+  Test-That 'reviewer line shows the retry' ($out -match 'tokens 6, 2 attempts, ok')
+  Remove-Item -Force $deny
+  $env:FAKE_AGY_DENY_TIMES = '9'
+  $out = Invoke-RevErr review --tiebreak 1 agy default low .sparring\round-1.response.md
+  Test-That 'denied twice: fails, no third try' ($code -eq 4 -and (Get-Content $deny) -eq '2')
+  Test-That 'the failure is recorded' ((Get-Content .sparring\reviews.tsv)[-1] -match "`t2`tfailed$")
+  Remove-Item Env:FAKE_AGY_DENY, Env:FAKE_AGY_DENY_TIMES
+  $null = Invoke-Rev review --tiebreak 1 agy gemini-x minimal .sparring\round-1.response.md   # put the tiebreak back
+
+  'agy+run (disposable copy)'
+  $aBefore = (Get-FileHash a.py).Hash
+  Remove-Item b.py   # a deleted tracked file must be missing in the copy too
+  $env:FAKE_AGY_TOUCH = 'a.py'
+  $out = Invoke-RevErr review --tiebreak 1 agy+run default low .sparring\round-1.response.md
+  Remove-Item Env:FAKE_AGY_TOUCH
+  & git checkout -q -- b.py
+  $copyDir = (Get-Content "$env:FAKE_ARGS.cwd" | Select-Object -First 1).Trim()
+  Test-That '+run: verdict, real tree untouched' ($code -eq 0 -and (Get-FileHash a.py).Hash -eq $aBefore)
+  Test-That '+run: ran in a copy, not the project' ($copyDir -ne (Get-Location).Path -and $copyDir -match 'sparring-copy\.[0-9a-f]+\\project$')
+  Test-That "+run: copy had the developer's files" ((Get-Content "$env:FAKE_ARGS.copy" | Select-Object -First 1).Trim() -eq "$aBefore|True|False")
+  $fa = Get-FakeArgs
+  Test-That '+run: no plan mode, no no-commands note' ($fa -notcontains 'plan' -and -not (($fa -join ' ') -match 'shell commands are not available'))
+  Test-That '+run: prompt says it is a copy' ((Get-Content -Raw .sparring\round-1.tiebreak.prompt.txt) -match 'disposable copy of the project')
+  Test-That '+run: copy removed afterwards' ($copyDir -and -not (Test-Path -LiteralPath $copyDir))
+  Test-That '+run: recorded as agy+run' ((Get-Content .sparring\reviews.tsv)[-1] -match "^1`ttiebreak`tagy\+run`tdefault`tlow`t")
+  $null = Invoke-Rev review 1 agy default low
+  Test-That 'plain agy still in the project, plan mode' ((Get-Content "$env:FAKE_ARGS.cwd" | Select-Object -First 1).Trim() -eq (Get-Location).Path -and (Get-FakeArgs) -contains 'plan')
+  $null = Invoke-Rev review 1 codex default medium   # put round 1 back
 
   'verdict validation'
   $env:FAKE_REVIEW = '{"verdict":"approve","summary":"s","issues":[{"id":"R9","severity":"blocking","location":"x","comment":"c","suggestion":""}],"withdrawn":[]}'
@@ -192,8 +265,10 @@ try {
   Test-That 'index left clean' (-not (& git status --porcelain))
 
   'new run'
-  $out = Invoke-Rev init codex
+  $out = Invoke-Rev init codex,agy+run
+  Test-That 'init accepts agy+run' ($code -eq 0)
   Test-That 'init moves the old run aside' ($out -match 'previous run moved' -and (Test-Path .sparring\previous\round-1.review.json))
+  Test-That 'init moves reviews.tsv aside too' ((Test-Path .sparring\previous\reviews.tsv) -and -not (Test-Path .sparring\reviews.tsv))
   Test-That 'init leaves no stale rounds' (-not (Get-ChildItem .sparring -Filter 'round-*') -and -not (Test-Path .sparring\task.md))
 
   'status'

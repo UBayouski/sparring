@@ -14,7 +14,8 @@
 #
 #   review.sh review [--tiebreak] [--timeout SECONDS] <round> <tool> <model> <effort> [response-file]
 #       Run one review round with a reviewer adapter and print the JSON verdict on stdout.
-#       tool:   codex | agy             (adapters live in reviewers/<tool>.sh)
+#       tool:   codex | agy             (adapters live in reviewers/<tool>.sh); add +run (agy+run)
+#               to review in a disposable copy of the project where the reviewer may run tests
 #       model:  a model name for that tool, or "default" for the tool's configured default
 #       effort: minimal | low | medium | high | xhigh | max   (adapters map what their CLI supports)
 #       --tiebreak: act as an independent third reviewer on the issues still disputed
@@ -134,10 +135,14 @@ cmd_init() {
       *)            need="$1"; shift ;;
     esac
   done
+  need="${need//+run/}"   # agy+run needs the same CLI as agy
   # Run through bash so a lost executable bit cannot skip the check.
   if [[ -f "$CHECK" ]]; then
     local out
-    if ! out="$(bash "$CHECK" ${need:+--need "$need"} 2>&1)"; then
+    # agy has no sign-in status command, so when it is one of this run's reviewers, the check
+    # sends it one tiny test prompt (a few seconds) instead of failing on the first review.
+    local deep=""; [[ ",$need," == *,agy,* ]] && deep=--deep
+    if ! out="$(bash "$CHECK" $deep ${need:+--need "$need"} 2>&1)"; then
       echo "$out"; die "prerequisites missing; run /sparring:check" 5
     fi
   fi
@@ -147,11 +152,11 @@ cmd_init() {
   printf '*\n' > "$STATE_DIR/.gitignore"
   # A new run starts clean, so stale rounds can never be read as this run's. The last run's
   # files are kept in previous/ (replacing the run before it).
-  if compgen -G "$STATE_DIR/round-*" >/dev/null; then
+  if compgen -G "$STATE_DIR/round-*" >/dev/null || [[ -f "$STATE_DIR/reviews.tsv" ]]; then
     rm -rf "$STATE_DIR/previous"
     mkdir -p "$STATE_DIR/previous"
-    mv "$STATE_DIR"/round-* "$STATE_DIR/previous/"
-    for f in task.md base config; do if [[ -f "$STATE_DIR/$f" ]]; then mv "$STATE_DIR/$f" "$STATE_DIR/previous/"; fi; done
+    if compgen -G "$STATE_DIR/round-*" >/dev/null; then mv "$STATE_DIR"/round-* "$STATE_DIR/previous/"; fi
+    for f in task.md base config reviews.tsv; do if [[ -f "$STATE_DIR/$f" ]]; then mv "$STATE_DIR/$f" "$STATE_DIR/previous/"; fi; done
     echo "previous run moved to $STATE_DIR/previous/"
   fi
   git rev-parse HEAD > "$STATE_DIR/base"
@@ -448,6 +453,49 @@ cmd_status() {
   return 0
 }
 
+# A disposable copy of the project for reviewers that may run commands (tool+run): a shared
+# clone at HEAD (its own refs and config, so nothing done there reaches this repo), with the
+# developer's changed, new and deleted files applied byte for byte, plus the state files the
+# prompt names. Ignored files (node_modules, virtualenvs, .env) are not copied.
+make_copy() {
+  local dir c f
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/sparring-copy.XXXXXX")" || return 1
+  c="$dir/project"
+  if ! git clone --quiet --shared --no-checkout "$PWD" "$c" >/dev/null 2>&1 ||
+     ! git -C "$c" -c advice.detachedHead=false checkout --quiet --detach "$(git rev-parse HEAD)" >/dev/null 2>&1; then
+    rm -rf "$dir"; return 1
+  fi
+  git ls-files -z -d -- . ":(exclude)$STATE_DIR" | while IFS= read -r -d '' f; do rm -f -- "$c/$f"; done
+  if ! git ls-files -z -m -o --exclude-standard -- . ":(exclude)$STATE_DIR" | while IFS= read -r -d '' f; do
+      [[ -f "$f" ]] || continue
+      mkdir -p -- "$c/$(dirname -- "$f")" && cp -p -- "$f" "$c/$f" || exit 1
+    done; then
+    rm -rf "$dir"; return 1
+  fi
+  mkdir -p "$c/$STATE_DIR" && find "$STATE_DIR" -maxdepth 1 -type f -exec cp -p {} "$c/$STATE_DIR/" \;
+  echo "$dir"
+}
+
+# One line per reviewer call (retries and failures too) in reviews.tsv, so the final report
+# can say which model really ran, for how long and at what cost. Reads cmd_review's locals.
+# The adapter's --meta mode reads its own log for what the CLI reported (model=, tokens=).
+record_review() {
+  local result="$1" secs=$((SECONDS - started)) meta ran="$model" tokens="" attempts=1 m t a
+  meta="$(bash "$SCRIPT_DIR/reviewers/$tool.sh" --meta "$log_file" 2>/dev/null | tr -d '\r')" || meta=""
+  m="$(sed -n 's/^model=//p' <<< "$meta" | head -n 1)"
+  t="$(sed -n 's/^tokens=//p' <<< "$meta" | tail -n 1)"
+  a="$(sed -n 's/^attempts=//p' <<< "$meta" | tail -n 1)"
+  [[ "$m" =~ ^[A-Za-z0-9._:/-]+$ ]] && ran="$m"
+  [[ "$t" =~ ^[0-9]+$ ]] && tokens="$t"
+  [[ "$a" =~ ^[1-9]$ ]] && attempts="$a"
+  [[ -f "$STATE_DIR/reviews.tsv" ]] ||
+    printf 'round\tkind\ttool\tmodel\teffort\tseconds\ttokens\tattempts\tresult\n' > "$STATE_DIR/reviews.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$round" "$kind" "$label" "$ran" "$effort" "$secs" "${tokens:--}" "$attempts" "$result" \
+    >> "$STATE_DIR/reviews.tsv"
+  local tries=""; ((attempts > 1)) && tries=", $attempts attempts"
+  echo "reviewer: $label, model $ran, effort $effort, ${secs}s, tokens ${tokens:-not reported}$tries, $result" >&2
+}
+
 cmd_review() {
   local tiebreak=0 limit="${SPARRING_REVIEW_TIMEOUT:-540}"
   while [[ "${1:-}" == --* ]]; do
@@ -458,8 +506,11 @@ cmd_review() {
     esac
   done
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || die "timeout must be a positive number of seconds"
-  [[ $# -ge 4 ]] || die "usage: review [--tiebreak] [--timeout SECONDS] <round> <tool> <model|default> <effort> [response-file]"
-  local round="$1" tool="$2" model="$3" effort="$4" response_file="${5:-}"
+  [[ $# -ge 4 ]] || die "usage: review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file]"
+  local round="$1" tool="$2" model="$3" effort="$4" response_file="${5:-}" run_mode=0
+  # tool+run: review in a disposable copy where the reviewer may run tests and other commands.
+  [[ "$tool" == *+run ]] && { run_mode=1; tool="${tool%+run}"; }
+  local label="$tool"; ((run_mode)) && label="$tool+run"
   [[ "$round" =~ ^[0-9]+$ ]] || die "round must be a number"
   [[ "$tool" =~ ^[a-z0-9-]+$ && -f "$SCRIPT_DIR/reviewers/$tool.sh" ]] || die "unknown reviewer tool: $tool (have: $(cd "$SCRIPT_DIR/reviewers" && ls *.sh | sed 's/\.sh$//' | tr '\n' ' '))"
   [[ "$model" =~ ^[A-Za-z0-9._:/-]+$ ]] || die "invalid model name: $model"
@@ -506,6 +557,10 @@ Review rules:
 - verdict approve only when no blocking issues remain. Nits alone do not block approval.
 - Be specific: point to the file and line, and say what to change.
 EOF
+    if ((run_mode)); then
+      echo
+      echo "You are working in a disposable copy of the project with the developer's changes applied. You may run tests, builds and linters there; whatever they change in the copy is thrown away. Files ignored by git, such as installed dependencies, are not in the copy; if a test cannot run for that reason, say so in summary."
+    fi
     if ((tiebreak)); then
       [[ -f "$prev_file" ]] || die "tiebreak needs $prev_file" 2
       echo
@@ -535,10 +590,19 @@ EOF
     echo "warning: could not snapshot the working tree; 'restore' will not be available for $tag" >&2
   fi
   rm -f "$out_file"
+  local kind=review started=$SECONDS
+  ((tiebreak)) && kind=tiebreak
   # Run the adapter through bash (no executable bit needed) under a watchdog, so a slow
   # reviewer ends with exit 7 instead of being cut off by the caller's tool timeout.
   export SPARRING_REVIEW_TIMEOUT="$limit"
-  bash "$SCRIPT_DIR/reviewers/$tool.sh" "$model" "$effort" "$SCHEMA" "$out_file" "$prompt_file" \
+  local run_dir="$PWD"
+  if ((run_mode)); then
+    COPY_DIR="$(make_copy)" || die "could not make a disposable copy of the project for $label" 4
+    trap 'rm -rf "$COPY_DIR"' EXIT   # global: the trap runs after this function returns
+    run_dir="$COPY_DIR/project"
+  fi
+  (cd "$run_dir" && SPARRING_ALLOW_COMMANDS="$run_mode" exec bash "$SCRIPT_DIR/reviewers/$tool.sh" \
+     "$model" "$effort" "$SCHEMA" "$OLDPWD/$out_file" "$OLDPWD/$prompt_file") \
     >"$log_file" 2>&1 </dev/null &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
@@ -547,6 +611,7 @@ EOF
       wait "$pid" 2>/dev/null || true
       echo "error: $tool review timed out after ${limit}s; last lines of $log_file:" >&2
       tail -n 20 "$log_file" >&2
+      record_review timeout
       exit 7
     fi
     sleep 1
@@ -556,6 +621,7 @@ EOF
   if ((rc != 0)); then
     echo "error: $tool review failed (exit $rc); last lines of $log_file:" >&2
     tail -n 20 "$log_file" >&2
+    record_review failed
     exit 4
   fi
   after="$(tree_state)"
@@ -569,17 +635,19 @@ EOF
       echo "Inspect with: git status. (No snapshot was saved, so 'restore' is not available.)" >&2
     fi
     echo "(If they are build or test artifacts, add them to .gitignore.)" >&2
+    record_review rejected
     exit 6
   fi
-  [[ -s "$out_file" ]] || die "$tool produced no review output (see $log_file)" 4
+  [[ -s "$out_file" ]] || { record_review invalid; die "$tool produced no review output (see $log_file)" 4; }
   local v=0
   validate_verdict "$out_file" || v=$?
   case "$v" in
     0) ;;
-    1) die "$tool output is not a valid verdict (see $out_file and $log_file)" 4 ;;
+    1) record_review invalid; die "$tool output is not a valid verdict (see $out_file and $log_file)" 4 ;;
     *) echo "warning: no JSON tool (jq, python3 or node) found; verdict not validated" >&2
-       grep -q '"verdict"' "$out_file" || die "$tool output is not a verdict (see $out_file and $log_file)" 4 ;;
+       grep -q '"verdict"' "$out_file" || { record_review invalid; die "$tool output is not a verdict (see $out_file and $log_file)" 4; } ;;
   esac
+  record_review ok
   cat "$out_file"
   echo
 }
@@ -589,5 +657,5 @@ case "${1:-}" in
   status)  shift; cmd_status "$@" ;;
   review)  shift; cmd_review "$@" ;;
   restore) shift; cmd_restore "$@" ;;
-  *) die "usage: $0 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool> <model|default> <effort> [response-file] | restore [--tiebreak] <round>" ;;
+  *) die "usage: $0 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round>" ;;
 esac

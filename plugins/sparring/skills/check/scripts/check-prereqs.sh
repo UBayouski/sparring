@@ -31,7 +31,7 @@ ps_cmd() { echo "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$1\"";
 add_agy_path() {
   [[ "$PLATFORM" == windows && -n "${LOCALAPPDATA:-}" ]] || return 0
   local d; d="$(cygpath -u "$LOCALAPPDATA" 2>/dev/null || echo "$LOCALAPPDATA")/agy/bin"
-  [[ -x "$d/agy.exe" || -x "$d/agy" ]] && ! have agy && export PATH="$d:$PATH"
+  if [[ -x "$d/agy.exe" || -x "$d/agy" ]] && ! have agy; then export PATH="$d:$PATH"; agy_off_path="$d"; fi
   return 0
 }
 ver()  { "$@" 2>/dev/null | head -n 1; }
@@ -283,6 +283,12 @@ else
   report WARN project "current folder is not a git repo; run: git init && git add -A && git commit -m 'initial commit'"
 fi
 
+# This script found agy by itself; the calling shell still cannot run it.
+if [[ -n "${agy_off_path:-}" ]]; then
+  report NOTE agy "found in $agy_off_path, which is not on this shell's PATH. Sparring's scripts find it anyway;"
+  report "" "" "to run agy yourself, open a new terminal or: export PATH=\"$agy_off_path:\$PATH\""
+fi
+
 echo
 if ((${#missing[@]})); then
   echo "RESULT: missing ${missing[*]}"
@@ -291,3 +297,4 @@ if ((${#missing[@]})); then
 fi
 echo "RESULT: ready"
 echo "READY_REVIEWERS: ${ready_reviewers[*]}"
+echo "NEXT: only the user can start the loop, by typing /sparring:run <task>"

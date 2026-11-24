@@ -22,7 +22,8 @@ function Have([string] $Name) { [bool](Get-Command $Name -ErrorAction SilentlyCo
 
 # The agy installer only updates PATH for new terminals; find a fresh install anyway.
 $agyBin = Join-Path $env:LOCALAPPDATA 'agy\bin'
-if (-not (Have agy) -and (Test-Path (Join-Path $agyBin 'agy.exe'))) { $env:PATH = "$agyBin;$env:PATH" }
+$agyOffPath = $null
+if (-not (Have agy) -and (Test-Path (Join-Path $agyBin 'agy.exe'))) { $env:PATH = "$agyBin;$env:PATH"; $agyOffPath = $agyBin }
 function FirstLine { param([scriptblock] $Block) $o = & $Block 2>$null; if ($o) { "$(@($o)[0])".Trim() } }
 function Report([string] $Status, [string] $Name, [string] $Detail) { Write-Output ('{0,-9} {1,-14} {2}' -f $Status, $Name, $Detail) }
 
@@ -179,8 +180,15 @@ if (Have git) {
   }
 }
 
+# This script found agy by itself; the calling shell still cannot run it.
+if ($agyOffPath) {
+  Report NOTE agy "found in $agyOffPath, which is not on this shell's PATH. Sparring's scripts find it anyway;"
+  Report '' '' ('to run agy yourself, open a new terminal or: $env:PATH = "' + $agyOffPath + ';$env:PATH"')
+}
+
 Write-Output ''
 $readyText = if ($ready.Count) { $ready -join ' ' } else { 'none' }
 if ($missing.Count -gt 0) { Write-Output "RESULT: missing $($missing -join ' ')"; Write-Output "READY_REVIEWERS: $readyText"; exit 1 }
 Write-Output 'RESULT: ready'
 Write-Output "READY_REVIEWERS: $readyText"
+Write-Output 'NEXT: only the user can start the loop, by typing /sparring:run <task>'
