@@ -43,16 +43,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File plugins\sparring\skills\chec
 
 ## Install
 
-Push this repo to any git host, then:
-
 ```bash
-claude plugin marketplace add <github-user>/sparring                     # GitHub shorthand
-claude plugin marketplace add https://gitlab.com/<user>/sparring.git     # GitLab
-claude plugin marketplace add https://bitbucket.org/<user>/sparring.git  # Bitbucket
+claude plugin marketplace add UBayouski/sparring
 claude plugin install sparring@sparring
 ```
 
-Private repos work as long as your `git` can clone them (SSH key or credential helper).
+To host your own copy, push this repo to any git host and add it by URL instead, for example
+`claude plugin marketplace add https://gitlab.com/<you>/sparring.git` (Bitbucket works the
+same way). Private repos work as long as your `git` can clone them (SSH key or credential
+helper).
 
 ## Use
 

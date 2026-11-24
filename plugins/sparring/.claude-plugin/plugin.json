@@ -2,8 +2,11 @@
   "name": "sparring",
   "description": "Claude Code implements, a reviewer CLI from another vendor (Codex, or Antigravity in beta) reviews, and they loop until approval. The user is asked only when they cannot agree.",
   "version": "0.2.0",
+  "homepage": "https://github.com/UBayouski/sparring",
+  "repository": "https://github.com/UBayouski/sparring",
   "author": {
-    "name": "Uladzislau Bayouski"
+    "name": "Uladzislau Bayouski",
+    "url": "https://github.com/UBayouski"
   },
   "license": "MIT",
   "keywords": [
