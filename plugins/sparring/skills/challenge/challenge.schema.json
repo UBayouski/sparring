@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer", "confidence", "findings", "unchecked"],
+  "properties": {
+    "answer": {
+      "type": "string",
+      "description": "Your own answer to the question in the brief, in a few sentences."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "high only when you checked the key facts yourself."
+    },
+    "findings": {
+      "type": "array",
+      "description": "The facts your answer rests on, each with its evidence.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "location", "claim", "evidence"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable id such as C1."
+          },
+          "location": {
+            "type": "string",
+            "description": "File and line, e.g. src/api.ts:42, a command, or 'general'."
+          },
+          "claim": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "What you read or ran that shows it. Say when it is inferred rather than checked."
+          }
+        }
+      }
+    },
+    "unchecked": {
+      "type": "array",
+      "description": "What you could not verify, and why.",
+      "items": { "type": "string" }
+    }
+  }
+}

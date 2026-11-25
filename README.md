@@ -16,6 +16,9 @@ they cannot agree.**
                  └─▶ deadlock? deep round → optional tiebreaker (2 of 3 decide) → you decide
 ```
 
+There is also a review-only mode, `challenge`: the reviewers check a question, a diagnosis or
+a decision independently, from the evidence alone, and no code is changed.
+
 Works on macOS, Linux, WSL and Windows. Each script has a bash (`.sh`) and a PowerShell
 (`.ps1`) version, and the skill picks one based on the platform.
 
@@ -60,6 +63,7 @@ In a Claude Code session, in your project folder (a git repo with at least one c
 ```
 /sparring:check
 /sparring:run add rate limiting to the public API
+/sparring:challenge why does the nightly export sometimes skip the last batch?
 ```
 
 `check` reports what is missing, prints the real install commands for your OS, and offers to
@@ -124,6 +128,41 @@ bin/sparring --orchestrator fable --dev sonnet,opus --tiebreaker agy/default:hig
 
 To use it from anywhere, put it on your PATH, e.g.
 `ln -s "$PWD/bin/sparring" ~/.local/bin/sparring`.
+
+### Checking a question: `challenge`
+
+```
+/sparring:challenge reviewer=codex/default:high,agy+run/default:high is it safe to run this migration twice?
+```
+
+`challenge` is for days when there is nothing to implement, only something to get right: a
+diagnosis, an analysis, a design decision, "is this safe". Nobody changes code.
+
+1. Claude gathers the evidence and writes a brief to `.sparring/challenge/brief.md`: the
+   question, phrased openly, plus file and line references, command output, logs and the
+   code the evidence depends on. **Claude's own conclusion stays out of the brief.** Claude
+   tells you its conclusion before the reviewers start, so you can see it was not adjusted
+   afterwards.
+2. All reviewers answer at the same time, each on its own: an answer, a confidence, findings
+   that each cite evidence, and what it could not verify.
+3. Claude compares their answers with its conclusion and checks every finding that goes
+   against it. If a reviewer disagrees, or Claude thinks a finding is wrong, there is one
+   follow-up round: Claude writes its conclusion and its replies to
+   `.sparring/challenge/reply.md`, and each reviewer says whether it agrees and whether each
+   of its findings stands or is withdrawn.
+4. Claude reports where the reviewers agree, where they split, the strongest point against
+   its conclusion, what nobody could verify, and each reviewer's time and tokens.
+
+| Option | Meaning | Default |
+|---|---|---|
+| `reviewer=` | Reviewers, as `tool/model:effort`; a bare tool name such as `agy` or `agy+run:medium` works too | one `<tool>/default:high` per ready tool, e.g. `codex/default:high,agy/default:high` |
+| `rounds=` | `2` allows the follow-up round, `1` stops after the first answers | `2` |
+
+Two reviewers from different vendors are worth more than one: their findings often differ,
+and in follow-up rounds one may withdraw a point while the other keeps it, with evidence.
+Use `agy+run` when an answer needs running code, such as tests or a quick probe script.
+Files are in `.sparring/challenge/`, and the challenge before that in
+`.sparring/challenge-previous/`. A challenge never touches the files of a `run`.
 
 ## What happens in a run
 
@@ -235,8 +274,9 @@ Each reviewer is one adapter in `plugins/sparring/skills/run/scripts/reviewers/`
 <adapter> --meta <log-file>
 ```
 
-The adapter writes a JSON verdict matching `<schema-file>` to `<out-file>`, sends logs to
-stderr, and exits 0. The driver handles the diff, the prompt, the tree check and errors. With
+The adapter writes JSON matching `<schema-file>` to `<out-file>` (a review verdict, or a
+challenge answer or reply; the adapter does not need to know which), sends logs to stderr,
+and exits 0. The driver handles the diff, the prompt, the tree check and errors. With
 `--meta`, it prints what its CLI reported in that log as `model=`, `tokens=` and `attempts=`
 lines, any of which may be missing; the driver records them in `reviews.tsv`. When
 `SPARRING_ALLOW_COMMANDS=1` is set, the driver has started it in a throwaway copy for
@@ -255,8 +295,9 @@ lines, any of which may be missing; the driver records them in `reviews.tsv`. Wh
   printed nothing when not run in a real terminal; if a review comes back empty, update `agy`.
 - **Windows:** both drivers have reviewed real changes on Windows 11 with `agy` 1.5.16
   (plain and `+run`, from Git Bash and Windows PowerShell 5.1) and Codex 0.171.0 (from Git
-  Bash). The smoke tests (`tests/run-tests.{sh,ps1}`) use fake reviewers and cover non-ASCII
-  file names and content. Reports from macOS and Linux welcome.
+  Bash). A two-round `challenge` with Codex and `agy+run` has run from both drivers. The smoke
+  tests (`tests/run-tests.{sh,ps1}`) use fake reviewers and cover non-ASCII file names and
+  content. Reports from macOS and Linux welcome.
 
 ## Layout
 
@@ -269,8 +310,10 @@ plugins/sparring/
   agents/developer.md                    developer subagent (model chosen per call)
   skills/run/SKILL.md                    the orchestration loop
   skills/run/review.schema.json          verdict schema shared by all reviewers
-  skills/run/scripts/review.{sh,ps1}     driver: diff, prompt, tree check, loop status
+  skills/run/scripts/review.{sh,ps1}     driver: diff, prompt, tree check, loop status, challenge
   skills/run/scripts/reviewers/          adapters: codex.{sh,ps1}, agy.{sh,ps1}
+  skills/challenge/SKILL.md              review-only mode: independent answers to one question
+  skills/challenge/*.schema.json         answer (round 1) and reply (round 2) schemas
   skills/check/SKILL.md                  prerequisites check and guided install
   skills/check/scripts/check-prereqs.{sh,ps1}
 ```

@@ -14,6 +14,8 @@ check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
 APPROVE='{"verdict":"approve","summary":"s","issues":[],"withdrawn":["R1"]}'
 CHANGES='{"verdict":"changes_requested","summary":"s","issues":[{"id":"R1","severity":"blocking","location":"a.py:1","comment":"c","suggestion":""}],"withdrawn":[]}'
+ANSWER='{"answer":"x is never reassigned","confidence":"high","findings":[{"id":"C1","location":"a.py:1","claim":"c","evidence":"e"}],"unchecked":[]}'
+REPLY='{"verdict":"agree","comment":"c","points":[{"id":"C1","status":"stands","comment":"c"}]}'
 mkdir -p "$T/bin" "$T/proj"
 
 # Fake codex: records its arguments, writes a review to the -o file.
@@ -28,7 +30,10 @@ printf '%s\n' "\$@" > "\$FAKE_ARGS"
 [[ -n "\${FAKE_SLEEP:-}" ]] && sleep "\$FAKE_SLEEP"
 echo "model: gpt-fake" >&2; printf 'tokens used\n1,234\n' >&2   # what codex exec logs
 out=""; while ((\$#)); do [[ "\$1" == -o ]] && out="\$2"; shift; done
-if [[ -n "\${FAKE_REVIEW:-}" ]]; then printf '%s\n' "\$FAKE_REVIEW" > "\$out"
+if [[ "\$out" == *answer.json ]]; then   # challenge
+  if [[ -n "\${FAKE_ANSWER:-}" ]]; then printf '%s\n' "\$FAKE_ANSWER" > "\$out"
+  elif [[ "\$out" == *round-2.* ]]; then echo '$REPLY' > "\$out"; else echo '$ANSWER' > "\$out"; fi
+elif [[ -n "\${FAKE_REVIEW:-}" ]]; then printf '%s\n' "\$FAKE_REVIEW" > "\$out"
 elif [[ "\$out" == *round-1.review* ]]; then echo '$CHANGES' > "\$out"; else echo '$APPROVE' > "\$out"; fi
 EOF
 # Fake agy: records its arguments, prints a JSON envelope with structured_output.
@@ -36,6 +41,7 @@ cat > "$T/bin/agy" <<EOF
 #!/usr/bin/env bash
 [[ "\${1:-}" == --version ]] && { echo "agy 1.2.4-fake"; exit 0; }
 [[ "\${2:-}" == "Reply with only the word ok."* ]] && { echo "\${FAKE_AGY_PROBE-ok}"; exit "\${FAKE_AGY_PROBE_EXIT:-0}"; }
+FAKE_ARGS="\${FAKE_AGY_ARGS:-\$FAKE_ARGS}"   # its own file when it runs next to codex
 printf '%s\n' "\$@" > "\$FAKE_ARGS"
 # Where it ran, and what that folder held: a.py's last line, new_file.py, b.py (for +run).
 pwd -P > "\$FAKE_ARGS.cwd"
@@ -50,7 +56,10 @@ if [[ -n "\${FAKE_AGY_DENY:-}" ]]; then
     exit 0
   fi
 fi
-echo '{"status":"SUCCESS","response":"...","structured_output":$APPROVE,"usage":{"total_tokens":1}}'
+out='$APPROVE'
+[[ "\$2" == *"check a question"* ]] && out='$ANSWER'
+[[ "\$2" == *"check a question"*"This is round 2"* ]] && out='$REPLY'
+echo "{\"status\":\"SUCCESS\",\"response\":\"...\",\"structured_output\":\$out,\"usage\":{\"total_tokens\":1}}"
 EOF
 chmod +x "$T/bin/codex" "$T/bin/agy"
 export PATH="$T/bin:$PATH" FAKE_ARGS="$T/args"
@@ -230,6 +239,54 @@ check "init accepts agy+run"               '[[ $code -eq 0 ]]'
 check "init moves the old run aside"       '[[ "$out" == *"previous run moved"* && -f .sparring/previous/round-1.review.json ]]'
 check "init moves reviews.tsv aside too"   '[[ -f .sparring/previous/reviews.tsv && ! -f .sparring/reviews.tsv ]]'
 check "init leaves no stale rounds"        '! compgen -G ".sparring/round-*" >/dev/null && [[ ! -f .sparring/task.md ]]'
+
+echo "challenge"
+out="$("$REVIEW" challenge init codex,agy+run </dev/null 2>&1)"; code=$?
+check "init starts a challenge"            '[[ $code -eq 0 && -f .sparring/challenge/reviews.tsv && "$out" == *"READY_REVIEWERS: codex agy"* ]]'
+"$REVIEW" challenge ask 1 codex </dev/null >/dev/null 2>&1; code=$?
+check "ask needs a brief"                  '[[ $code -eq 2 ]]'
+echo "Why does x stay 1?" > .sparring/challenge/brief.md
+echo "y = 3" >> a.py   # uncommitted: the +run copy must have it
+out="$(FAKE_AGY_ARGS="$T/agyargs" "$REVIEW" challenge ask 1 codex/default agy+run </dev/null 2>"$T/err")"; code=$?
+check "both reviewers answer"              '[[ $code -eq 0 && "$out" == *"== reviewer 1: codex/default:high, ok =="*"\"answer\""*"== reviewer 2: agy+run/default:high, ok =="* ]]'
+check "answers saved by number"            '[[ -s .sparring/challenge/round-1.1.answer.json && -s .sparring/challenge/round-1.2.answer.json ]]'
+check "agy answer unwrapped"               '! grep -q structured_output .sparring/challenge/round-1.2.answer.json'
+check "challenge schema passed"            'grep -q challenge.schema.json "$FAKE_ARGS" && grep -q challenge.schema.json "$T/agyargs"'
+check "prompt: brief and evidence rules"   'grep -q "challenge/brief.md" "$FAKE_ARGS" && grep -q "Every finding needs evidence" "$FAKE_ARGS"'
+check "effort defaults to high"            'grep -qx model_reasoning_effort=high "$FAKE_ARGS"'
+cwd="$(cat "$T/agyargs.cwd")"
+check "agy+run: in a copy, removed after"  '[[ "$cwd" == */sparring-copy.*/project && ! -d "$cwd" ]]'
+check "agy+run: copy has uncommitted work" '[[ "$(cut -d"|" -f1 "$T/agyargs.copy")" == "y = 3" ]]'
+check "agy+run: may run commands"          '! grep -qx plan "$T/agyargs"'
+check "recorded per reviewer"              'grep -qP "^1\tchallenge-1\tcodex\tgpt-fake\thigh\t[0-9]+\t1234\t1\tok$" .sparring/challenge/reviews.tsv && grep -qP "^1\tchallenge-2\tagy\+run\tdefault\thigh\t" .sparring/challenge/reviews.tsv'
+check "the run's files are left alone"     '[[ ! -f .sparring/reviews.tsv ]]'
+"$REVIEW" challenge ask 2 codex agy+run </dev/null >/dev/null 2>&1; code=$?
+check "round 2 needs a reply"              '[[ $code -eq 2 ]]'
+printf '# My conclusion\nx is never reassigned.\n## Reviewer 1\nC1: agreed\n## Reviewer 2\nC1: agreed\n' > .sparring/challenge/reply.md
+out="$(FAKE_AGY_ARGS="$T/agyargs" "$REVIEW" challenge ask 2 codex agy+run:low </dev/null 2>/dev/null)"; code=$?
+check "round 2 gives verdicts"             '[[ $code -eq 0 && "$out" == *"reviewer 2: agy+run/default:low, ok"*"\"verdict\""* ]]'
+check "round 2 sees its answer and reply"  'grep -q "round-1.1.answer.json" "$FAKE_ARGS" && grep -q "heading Reviewer 2" "$T/agyargs" && grep -q "challenge/reply.md" "$T/agyargs"'
+check "reply schema passed"                'grep -q challenge-reply.schema.json "$FAKE_ARGS"'
+out="$("$REVIEW" challenge ask 2 codex agy agy </dev/null 2>&1)"; code=$?
+check "round 2 skips a reviewer without an answer" '[[ $code -eq 0 && "$out" == *"reviewer 3 (agy) has no round 1 answer"* ]]'
+out="$(FAKE_AGY_ARGS="$T/agyargs" "$REVIEW" challenge ask --only 2 1 codex agy </dev/null 2>/dev/null)"; code=$?
+check "--only runs just those"             '[[ $code -eq 0 && "$out" == *"reviewer 2: agy"* && "$out" != *"reviewer 1"* ]]'
+out="$(FAKE_AGY_ARGS="$T/agyargs" FAKE_ANSWER='{"answer":1}' "$REVIEW" challenge ask 1 codex agy </dev/null 2>&1)"; code=$?
+check "one bad answer: the rest still count" '[[ $code -eq 0 && "$out" == *"reviewer 1: codex/default:high, invalid"* && "$out" == *"reviewer 2: agy/default:high, ok"* ]]'
+FAKE_ANSWER='{"answer":1}' "$REVIEW" challenge ask 1 codex </dev/null >/dev/null 2>&1; code=$?
+check "no valid answer exits 4"            '[[ $code -eq 4 ]]'
+start=$SECONDS
+FAKE_SLEEP=30 "$REVIEW" challenge ask --timeout 2 1 codex </dev/null >/dev/null 2>&1; code=$?
+check "all timed out: exit 7, promptly"    '[[ $code -eq 7 ]] && (( SECONDS - start < 15 ))'
+FAKE_TOUCH=a.py "$REVIEW" challenge ask 1 codex </dev/null >/dev/null 2>&1; code=$?
+check "a changed tree rejects the answers" '[[ $code -eq 6 ]] && tail -n 1 .sparring/challenge/reviews.tsv | grep -qP "\trejected$"'
+"$REVIEW" challenge ask 1 nosuch/x </dev/null >/dev/null 2>&1; code=$?
+check "rejects an unknown tool"            '[[ $code -ne 0 ]]'
+out="$("$REVIEW" challenge init codex </dev/null 2>&1)"
+check "init keeps the last challenge"      '[[ "$out" == *"previous challenge moved"* && -f .sparring/challenge-previous/brief.md && ! -f .sparring/challenge/brief.md ]]'
+out="$(FAKE_AGY_PROBE_EXIT=1 FAKE_AGY_PROBE="auth required" "$REVIEW" challenge init </dev/null 2>&1)"; code=$?
+check "no tools: a signed-out agy is left out" '[[ $code -eq 0 && "$out" == *"READY_REVIEWERS: codex"* && "$out" != *"READY_REVIEWERS: codex agy"* ]]'
+git checkout -q -- a.py
 
 echo "status"
 # Round files are written by hand here; status only reads them.

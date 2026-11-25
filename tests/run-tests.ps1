@@ -17,6 +17,8 @@ function Test-That([string] $Name, [bool] $Ok) {
 
 $approve = '{"verdict":"approve","summary":"s","issues":[],"withdrawn":["R1"]}'
 $changes = '{"verdict":"changes_requested","summary":"s","issues":[{"id":"R1","severity":"blocking","location":"a.py:1","comment":"c","suggestion":""}],"withdrawn":[]}'
+$answer = '{"answer":"x is never reassigned","confidence":"high","findings":[{"id":"C1","location":"a.py:1","claim":"c","evidence":"e"}],"unchecked":[]}'
+$reply = '{"verdict":"agree","comment":"c","points":[{"id":"C1","status":"stands","comment":"c"}]}'
 $env:FAKE_ARGS = "$T\args.txt"
 
 # Fake codex: records its arguments, writes a review to the -o file.
@@ -32,7 +34,10 @@ if (`$env:FAKE_SLEEP) { Start-Sleep -Seconds ([int] `$env:FAKE_SLEEP) }
 # What codex exec logs: the model in its header, then the token count.
 [Console]::Error.WriteLine('model: gpt-fake'); [Console]::Error.WriteLine('tokens used'); [Console]::Error.WriteLine('1,234')
 for (`$i = 0; `$i -lt `$a.Count; `$i++) { if (`$a[`$i] -eq '-o') { `$out = `$a[`$i + 1] } }
-if (`$env:FAKE_REVIEW) { `$json = `$env:FAKE_REVIEW }
+if (`$out -like '*answer.json') {   # challenge
+  if (`$env:FAKE_ANSWER) { `$json = `$env:FAKE_ANSWER } elseif (`$out -like '*round-2.*') { `$json = '$reply' } else { `$json = '$answer' }
+}
+elseif (`$env:FAKE_REVIEW) { `$json = `$env:FAKE_REVIEW }
 elseif (`$out -like '*round-1.review*') { `$json = '$changes' } else { `$json = '$approve' }
 [System.IO.File]::WriteAllText(`$out, `$json)
 exit 0
@@ -46,6 +51,7 @@ if (`$a[1] -like 'Reply with only the word ok.*') {
   if (`$null -ne `$env:FAKE_AGY_PROBE) { `$env:FAKE_AGY_PROBE } else { 'ok' }
   if (`$env:FAKE_AGY_PROBE_EXIT) { exit [int] `$env:FAKE_AGY_PROBE_EXIT } else { exit 0 }
 }
+if (`$env:FAKE_AGY_ARGS) { `$env:FAKE_ARGS = `$env:FAKE_AGY_ARGS }   # its own file when it runs next to codex
 `$a | Set-Content -Encoding utf8 `$env:FAKE_ARGS
 # Where it ran, and what that folder held (for +run): a.py's bytes, with space.py, b.py.
 (Get-Location).Path | Set-Content -Encoding utf8 "`$env:FAKE_ARGS.cwd"
@@ -63,7 +69,10 @@ if (`$env:FAKE_AGY_DENY) {
     exit 0
   }
 }
-'{"status":"SUCCESS","response":"...","structured_output":$approve,"usage":{"total_tokens":1}}'
+`$so = '$approve'
+if (`$a[1] -like '*check a question*') { `$so = '$answer' }
+if (`$a[1] -like '*check a question*This is round 2*') { `$so = '$reply' }
+'{"status":"SUCCESS","response":"...","structured_output":' + `$so + ',"usage":{"total_tokens":1}}'
 exit 0
 "@ | Set-Content -Encoding ascii "$T\bin\agy.ps1"
 
@@ -270,6 +279,68 @@ try {
   Test-That 'init moves the old run aside' ($out -match 'previous run moved' -and (Test-Path .sparring\previous\round-1.review.json))
   Test-That 'init moves reviews.tsv aside too' ((Test-Path .sparring\previous\reviews.tsv) -and -not (Test-Path .sparring\reviews.tsv))
   Test-That 'init leaves no stale rounds' (-not (Get-ChildItem .sparring -Filter 'round-*') -and -not (Test-Path .sparring\task.md))
+
+  'challenge'
+  $out = Invoke-Rev challenge init codex,agy+run
+  Test-That 'init starts a challenge' ($code -eq 0 -and (Test-Path .sparring\challenge\reviews.tsv) -and $out -match 'READY_REVIEWERS: codex agy')
+  $null = Invoke-Rev challenge ask 1 codex
+  Test-That 'ask needs a brief' ($code -eq 2)
+  Set-Content -Encoding ascii .sparring\challenge\brief.md 'Why does x stay 1?'
+  Add-Content -Path a.py -Value 'y = 3'   # uncommitted: the +run copy must have it
+  $aNow = (Get-FileHash a.py).Hash
+  $env:FAKE_AGY_ARGS = "$T\agyargs.txt"
+  $out = Invoke-Rev challenge ask 1 codex/default agy+run
+  Test-That 'both reviewers answer' ($code -eq 0 -and $out -match '(?s)== reviewer 1: codex/default:high, ok ==.*"answer".*== reviewer 2: agy\+run/default:high, ok ==')
+  Test-That 'answers saved by number' ((Test-Path .sparring\challenge\round-1.1.answer.json) -and (Test-Path .sparring\challenge\round-1.2.answer.json))
+  Test-That 'agy answer unwrapped' ((Get-Content -Raw .sparring\challenge\round-1.2.answer.json) -notmatch 'structured_output')
+  $fa = (Get-FakeArgs) -join ' '; $ga = (Get-Content "$T\agyargs.txt") -join ' '
+  Test-That 'challenge schema passed' ($fa -match 'challenge\.schema\.json' -and $ga -match 'challenge\.schema\.json')
+  Test-That 'prompt: brief and evidence rules' ($fa -match 'challenge/brief\.md' -and $fa -match 'Every finding needs evidence')
+  Test-That 'effort defaults to high' ((Get-FakeArgs) -contains 'model_reasoning_effort=high')
+  $cwd = (Get-Content "$T\agyargs.txt.cwd" | Select-Object -First 1).Trim()
+  Test-That 'agy+run: in a copy, removed after' ($cwd -match 'sparring-copy\.[0-9a-f]+\\project$' -and -not (Test-Path -LiteralPath $cwd))
+  Test-That 'agy+run: copy has uncommitted work' (((Get-Content "$T\agyargs.txt.copy" | Select-Object -First 1) -split '\|')[0] -eq $aNow)
+  Test-That 'agy+run: may run commands' ((Get-Content "$T\agyargs.txt") -notcontains 'plan')
+  $tsv = Get-Content .sparring\challenge\reviews.tsv
+  Test-That 'recorded per reviewer' (($tsv -match "^1`tchallenge-1`tcodex`tgpt-fake`thigh`t[0-9]+`t1234`t1`tok$").Count -eq 1 -and ($tsv -match "^1`tchallenge-2`tagy\+run`tdefault`thigh`t").Count -eq 1)
+  Test-That "the run's files are left alone" (-not (Test-Path .sparring\reviews.tsv))
+  $null = Invoke-Rev challenge ask 2 codex agy+run
+  Test-That 'round 2 needs a reply' ($code -eq 2)
+  Set-Content -Encoding ascii .sparring\challenge\reply.md @('# My conclusion', 'x is never reassigned.', '## Reviewer 1', 'C1: agreed', '## Reviewer 2', 'C1: agreed')
+  $out = Invoke-Rev challenge ask 2 codex agy+run:low
+  Test-That 'round 2 gives verdicts' ($code -eq 0 -and $out -match '(?s)reviewer 2: agy\+run/default:low, ok.*"verdict"')
+  $fa = (Get-FakeArgs) -join ' '; $ga = (Get-Content "$T\agyargs.txt") -join ' '
+  Test-That 'round 2 sees its answer and reply' ($fa -match 'round-1\.1\.answer\.json' -and $ga -match 'heading Reviewer 2' -and $ga -match 'challenge/reply\.md')
+  Test-That 'reply schema passed' ($fa -match 'challenge-reply\.schema\.json')
+  $out = Invoke-RevErr challenge ask 2 codex agy agy
+  Test-That 'round 2 skips a reviewer without an answer' ($code -eq 0 -and $out -match 'reviewer 3 \(agy\) has no round 1 answer')
+  $out = Invoke-Rev challenge ask --only 2 1 codex agy
+  Test-That '--only runs just those' ($code -eq 0 -and $out -match 'reviewer 2: agy' -and $out -notmatch 'reviewer 1')
+  $env:FAKE_ANSWER = '{"answer":1}'
+  $out = Invoke-Rev challenge ask 1 codex agy
+  Test-That 'one bad answer: the rest still count' ($code -eq 0 -and $out -match 'reviewer 1: codex/default:high, invalid' -and $out -match 'reviewer 2: agy/default:high, ok')
+  $null = Invoke-Rev challenge ask 1 codex
+  Test-That 'no valid answer exits 4' ($code -eq 4)
+  Remove-Item Env:FAKE_ANSWER
+  $env:FAKE_SLEEP = '30'
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $null = Invoke-Rev challenge ask --timeout 3 1 codex
+  Test-That 'all timed out: exit 7, promptly' ($code -eq 7 -and $sw.Elapsed.TotalSeconds -lt 20)
+  Clear-Fakes
+  $env:FAKE_TOUCH = "$T\proj\a.py"
+  $null = Invoke-Rev challenge ask 1 codex
+  Clear-Fakes
+  Test-That 'a changed tree rejects the answers' ($code -eq 6 -and (Get-Content .sparring\challenge\reviews.tsv)[-1] -match "`trejected$")
+  $null = Invoke-Rev challenge ask 1 nosuch/x
+  Test-That 'rejects an unknown tool' ($code -ne 0)
+  $out = Invoke-Rev challenge init codex
+  Test-That 'init keeps the last challenge' ($out -match 'previous challenge moved' -and (Test-Path .sparring\challenge-previous\brief.md) -and -not (Test-Path .sparring\challenge\brief.md))
+  Remove-Item Env:FAKE_AGY_ARGS
+  $env:FAKE_AGY_PROBE = 'auth required'; $env:FAKE_AGY_PROBE_EXIT = '1'
+  $out = Invoke-Rev challenge init
+  Remove-Item Env:FAKE_AGY_PROBE, Env:FAKE_AGY_PROBE_EXIT
+  Test-That 'no tools: a signed-out agy is left out' ($code -eq 0 -and $out -match 'READY_REVIEWERS: codex' -and $out -notmatch 'READY_REVIEWERS: codex agy')
+  & git checkout -q -- a.py
 
   'status'
   # Round files are written by hand here; status only reads them.

@@ -297,4 +297,4 @@ if ((${#missing[@]})); then
 fi
 echo "RESULT: ready"
 echo "READY_REVIEWERS: ${ready_reviewers[*]}"
-echo "NEXT: only the user can start the loop, by typing /sparring:run <task>"
+echo "NEXT: only the user can start sparring, by typing /sparring:run <task> or /sparring:challenge <question>"

@@ -1,6 +1,6 @@
 {
   "name": "sparring",
-  "description": "Claude Code implements, a reviewer CLI from another vendor (Codex, or Antigravity in beta) reviews, and they loop until approval. The user is asked only when they cannot agree.",
+  "description": "Claude Code implements, a reviewer CLI from another vendor (Codex, or Antigravity in beta) reviews, and they loop until approval. The user is asked only when they cannot agree. A review-only challenge mode has the reviewers check a question independently.",
   "version": "0.2.0",
   "homepage": "https://github.com/UBayouski/sparring",
   "repository": "https://github.com/UBayouski/sparring",

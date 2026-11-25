@@ -29,8 +29,9 @@ For each missing item it shows the real install commands for this machine.
 
 If the result is ready, say so in one line, listing the versions found and which reviewers
 are ready, and stop. Mention optional items (`OPTIONAL`, `REVIEWER`) and any `NOTE` only in a
-short second line. End with the `NEXT:` line's point: only the user can start the loop, by
-typing `/sparring:run <task>`; you cannot start it yourself.
+short second line. End with the `NEXT:` line's point: only the user can start sparring, by
+typing `/sparring:run <task>` (implement and review) or `/sparring:challenge <question>`
+(review only, no code changes); you cannot start either yourself.
 
 Otherwise show the user each missing item with its install commands, exactly as printed.
 

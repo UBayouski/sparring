@@ -5,6 +5,8 @@
 #   review.ps1 status
 #   review.ps1 review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file]
 #   review.ps1 restore [--tiebreak] <round>
+#   review.ps1 challenge init [tools]
+#   review.ps1 challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...
 #
 # Exit codes: 2 setup, 3 nothing to review, 4 reviewer failed or gave an invalid verdict,
 #             5 prerequisites missing, 6 reviewer changed files (undo with restore),
@@ -152,6 +154,26 @@ function Get-TreeState {
   [BitConverter]::ToString($sha.ComputeHash($bytes))
 }
 
+# Run the check for the reviewer tools in $Need (comma list; empty: any reviewer) and return
+# its output lines. Exits 5 if something is missing.
+function Invoke-Check([string] $Need, [switch] $DeepWhenAny) {
+  $Need = $Need -replace '\+run', ''   # agy+run needs the same CLI as agy
+  if (-not (Test-Path $Check)) { return @() }
+  $checkArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Check)
+  # agy has no sign-in status command, so when it is one of this run's reviewers, the check
+  # sends it one tiny test prompt (a few seconds) instead of failing on the first review.
+  # With no tools named and -DeepWhenAny, agy is checked that way too, so READY_REVIEWERS
+  # leaves out an agy that is not signed in.
+  if (($Need -and (($Need -split ',') -contains 'agy')) -or (-not $Need -and $DeepWhenAny)) { $checkArgs += '-Deep' }
+  if ($Need) { $checkArgs += @('-Need', $Need) }
+  $out = & $PsHost @checkArgs 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    foreach ($l in $out) { [Console]::Out.WriteLine("$l") }   # not captured by the caller
+    Die 'prerequisites missing; run /sparring:check' 5
+  }
+  $out | ForEach-Object { "$_" }
+}
+
 function Invoke-Init([string[]] $A) {
   $Need = ''; $rounds = 3; $tiebreaker = 0
   for ($i = 0; $i -lt $A.Count; $i++) {
@@ -165,16 +187,7 @@ function Invoke-Init([string[]] $A) {
       default { $Need = $A[$i] }
     }
   }
-  $Need = $Need -replace '\+run', ''   # agy+run needs the same CLI as agy
-  if (Test-Path $Check) {
-    $checkArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Check)
-    # agy has no sign-in status command, so when it is one of this run's reviewers, the check
-    # sends it one tiny test prompt (a few seconds) instead of failing on the first review.
-    if ($Need -and (($Need -split ',') -contains 'agy')) { $checkArgs += '-Deep' }
-    if ($Need) { $checkArgs += @('-Need', $Need) }
-    $out = & $PsHost @checkArgs 2>&1
-    if ($LASTEXITCODE -ne 0) { $out | Write-Output; Die 'prerequisites missing; run /sparring:check' 5 }
-  }
+  $null = Invoke-Check $Need
   & git rev-parse --verify HEAD *> $null
   if ($LASTEXITCODE -ne 0) { Die 'repository has no commits yet; make an initial commit first' 2 }
   New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
@@ -420,6 +433,12 @@ function New-ReviewCopy {
     $state = Join-Path $c $StateDir
     New-Item -ItemType Directory -Force -Path $state | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $top $StateDir) -File -Force | Copy-Item -Destination $state -Force -ErrorAction Stop
+    $ch = Join-Path $top "$StateDir/challenge"
+    if (Test-Path -LiteralPath $ch) {
+      $chCopy = Join-Path $state 'challenge'
+      New-Item -ItemType Directory -Force -Path $chCopy | Out-Null
+      Get-ChildItem -LiteralPath $ch -File -Force | Copy-Item -Destination $chCopy -Force -ErrorAction Stop
+    }
   } catch { Remove-ReviewCopy $dir; return $null }
   $dir
 }
@@ -431,7 +450,8 @@ function Remove-ReviewCopy([string] $Dir) {
 # can say which model really ran, for how long and at what cost. Reads Invoke-Review's
 # variables. The adapter's --meta mode reads its own log for what the CLI reported.
 function Write-ReviewRecord([string] $Result) {
-  $secs = [int] ((Get-Date) - $started).TotalSeconds
+  $end = if ($finishedAt) { $finishedAt } else { Get-Date }
+  $secs = [int] ($end - $started).TotalSeconds
   $ran = $model; $tokens = ''; $attempts = 1
   $meta = @(& $adapter '--meta' (Join-Path $top $logFile) 2>$null)
   foreach ($line in $meta) {
@@ -440,7 +460,7 @@ function Write-ReviewRecord([string] $Result) {
     elseif ($l -match '^tokens=([0-9]+)$') { $tokens = $Matches[1] }
     elseif ($l -match '^attempts=([1-9])$') { $attempts = [int] $Matches[1] }
   }
-  $tsv = Join-Path $top "$StateDir/reviews.tsv"
+  $tsv = if ($TsvPath) { $TsvPath } else { Join-Path $top "$StateDir/reviews.tsv" }
   if (-not (Test-Path $tsv)) { [System.IO.File]::WriteAllText($tsv, "round`tkind`ttool`tmodel`teffort`tseconds`ttokens`tattempts`tresult`n", $Utf8) }
   $t = if ($tokens) { $tokens } else { '-' }
   [System.IO.File]::AppendAllText($tsv, "$n`t$kind`t$label`t$ran`t$effort`t$secs`t$t`t$attempts`t$Result`n", $Utf8)
@@ -610,6 +630,283 @@ function Invoke-Review([string[]] $A) {
   $json
 }
 
+# ---- challenge: independent reviewers answer one question; no code is changed ---------------
+
+$ChDir = "$StateDir/challenge"
+
+function Test-NonEmpty([string] $Path) { (Test-Path -LiteralPath $Path) -and (Get-Item -LiteralPath $Path).Length -gt 0 }
+
+# Split a reviewer entry tool[+run]/model:effort. A bare tool name (agy, agy+run:high) means
+# its default model; without a tool, codex. Effort defaults to high.
+function Split-Entry([string] $E, [int] $Num) {
+  $tool = 'codex'; $model = 'default'; $effort = 'high'; $rest = $E
+  if ($E.Contains('/')) {
+    $i = $E.IndexOf('/'); $tool = $E.Substring(0, $i); $rest = $E.Substring($i + 1)
+  } else {
+    $head = ($E -split ':', 2)[0]
+    $bare = $head -replace '\+run$', ''
+    if ($bare -cmatch '^[a-z0-9-]+$' -and (Test-Path (Join-Path $ScriptDir "reviewers\$bare.ps1"))) {
+      $tool = $head; $rest = 'default' + $E.Substring($head.Length)
+    }
+  }
+  if ($rest -cmatch '^(.*):(minimal|low|medium|high|xhigh|max)$') { $rest = $Matches[1]; $effort = $Matches[2] }
+  if ($rest) { $model = $rest }
+  $bare = $tool -replace '\+run$', ''
+  if ($bare -cnotmatch '^[a-z0-9-]+$' -or -not (Test-Path (Join-Path $ScriptDir "reviewers\$bare.ps1"))) { Die "unknown reviewer tool in ${E}: $bare" }
+  if ($model -cnotmatch '^[A-Za-z0-9._:/-]+$') { Die "invalid model name in ${E}: $model" }
+  [pscustomobject]@{ Num = $Num; Tool = $bare; Label = $tool; Model = $model; Effort = $effort; Run = ($tool -like '*+run')
+                     State = 'skip'; Proc = $null; End = $null; CopyDir = $null }
+}
+
+# Check a round 1 answer or a round 2 reply, unwrapping an agy envelope. Returns the JSON
+# text, or $null.
+function Get-ValidAnswer([string] $Path, [int] $Round) {
+  $text = [System.IO.File]::ReadAllText($Path, $Utf8)
+  try { $d = $text | ConvertFrom-Json } catch { return $null }
+  $changed = $false
+  if ((Test-Prop $d 'structured_output') -and -not (Test-Prop $d 'answer') -and -not (Test-Prop $d 'verdict')) {
+    $d = $d.structured_output; $changed = $true
+  }
+  if ($null -eq $d -or $d -isnot [System.Management.Automation.PSCustomObject]) { return $null }
+  if ($Round -eq 1) {
+    if (-not (Test-Prop $d 'answer') -or $d.answer -isnot [string]) { return $null }
+    if (-not (Test-Prop $d 'findings') -or -not (Test-Prop $d 'unchecked')) { return $null }
+    if ($null -ne $d.findings -and $d.findings -isnot [array]) { return $null }
+    if ($null -ne $d.unchecked -and $d.unchecked -isnot [array]) { return $null }
+    foreach ($i in @($d.findings | Where-Object { $null -ne $_ })) {
+      if (-not (Test-Prop $i 'id') -or $i.id -isnot [string]) { return $null }
+    }
+  } else {
+    if (-not (Test-Prop $d 'verdict') -or $d.verdict -cnotin @('agree', 'disagree', 'partly')) { return $null }
+    if (-not (Test-Prop $d 'points') -or ($null -ne $d.points -and $d.points -isnot [array])) { return $null }
+    foreach ($i in @($d.points | Where-Object { $null -ne $_ })) {
+      if (-not (Test-Prop $i 'id') -or $i.id -isnot [string] -or $i.status -cnotin @('stands', 'withdrawn')) { return $null }
+    }
+  }
+  if (-not $changed) { return $text }
+  $json = $d | ConvertTo-Json -Depth 20
+  [System.IO.File]::WriteAllText($Path, $json, $Utf8)
+  $json
+}
+
+# The prompt for one reviewer. Like the review prompt, it holds no user text and no double quotes.
+function Write-ChallengePrompt([int] $Round, [int] $Num, [bool] $Run, [string] $Path) {
+  $lines = @(
+    'You are an independent REVIEWER, asked to check a question with fresh eyes. Do not edit any files.',
+    '',
+    "The question and the evidence are in the file $ChDir/brief.md. Read it, then read the code and files it names, and anything else in the project you need. You may run read-only commands such as tests or linters."
+  )
+  if ($Run) {
+    $lines += @('', 'You are working in a disposable copy of the project, with its uncommitted changes applied. You may run tests, builds and linters there; whatever they change in the copy is thrown away. Files ignored by git, such as installed dependencies, are not in the copy; if a check cannot run for that reason, say so.')
+  }
+  if ($Round -eq 1) {
+    $lines += @(
+      '',
+      'Rules:',
+      '- Reach your own answer from the evidence. Do not take the brief''s framing on trust: if the question rests on a wrong premise, say so in answer.',
+      '- If the brief states a claim to test, try hard to refute it before you accept it.',
+      '- Every finding needs evidence: a file and line, a command and its output, or a quoted passage. Say when something is inferred rather than checked.',
+      '- Give every finding an id like C1, C2.',
+      '- Put what you could not verify, and why, in unchecked.',
+      '- confidence high only when you checked the key facts yourself.'
+    )
+  } else {
+    $lines += @(
+      '',
+      "This is round 2. Your earlier answer is in the file $ChDir/round-1.$Num.answer.json.",
+      "The orchestrator's own conclusion, and its reply to your findings under the heading Reviewer $Num, are in the file $ChDir/reply.md.",
+      '',
+      'Rules:',
+      '- Judge the orchestrator''s conclusion on the merits: verdict agree, disagree or partly.',
+      '- For each of your earlier findings: status stands if it still holds after the reply, withdrawn if the reply answers it. Say why in comment.',
+      '- Change your mind when the argument is good; do not drop a real problem to be agreeable.',
+      '- You may add an important new point, with a new id and status stands.'
+    )
+  }
+  [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"), $Utf8)
+}
+
+function Invoke-ChallengeInit([string[]] $A) {
+  if (@($A | Where-Object { $_ -like '--*' }).Count -gt 0) { Die 'usage: review.ps1 challenge init [tools]' }
+  $need = @($A | Where-Object { $_ }) -join ','   # codex,agy arrives as one argument or as several
+  $checkOut = @(Invoke-Check $need -DeepWhenAny)
+  & git rev-parse --verify HEAD *> $null
+  if ($LASTEXITCODE -ne 0) { Die 'repository has no commits yet; make an initial commit first' 2 }
+  New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+  Set-Content -Path (Join-Path $StateDir '.gitignore') -Value '*' -Encoding ascii
+  # A new challenge starts clean; the last one is kept in challenge-previous/.
+  if (Test-Path -LiteralPath $ChDir) {
+    $prev = "$StateDir/challenge-previous"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $prev
+    # A folder cannot be renamed while a leftover process (say, from a reviewer that timed out)
+    # holds a file in it open; copy it instead, and clear what can be cleared.
+    try { Move-Item -LiteralPath $ChDir -Destination $prev -ErrorAction Stop }
+    catch {
+      Copy-Item -Recurse -LiteralPath $ChDir -Destination $prev -Force
+      Remove-Item -Recurse -Force -LiteralPath $ChDir -ErrorAction SilentlyContinue
+      $left = @(Get-ChildItem -LiteralPath $ChDir -Force -ErrorAction SilentlyContinue)
+      if ($left.Count -gt 0) { Write-Output "warning: some files in $ChDir are in use and were left there: $(($left | ForEach-Object { $_.Name }) -join ' ')" }
+    }
+    Write-Output "previous challenge moved to $StateDir/challenge-previous/"
+  }
+  New-Item -ItemType Directory -Force -Path $ChDir | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $top "$ChDir/reviews.tsv"), "round`tkind`ttool`tmodel`teffort`tseconds`ttokens`tattempts`tresult`n", $Utf8)
+  Write-Output "challenge: write the question and the evidence to $ChDir/brief.md, then run: challenge ask 1 <reviewers>"
+  $checkOut | Where-Object { $_ -match '^READY_REVIEWERS:' } | ForEach-Object { Write-Output $_ }
+}
+
+# Run every reviewer at once on the brief (round 1) or on the orchestrator's reply (round 2).
+# Prints each valid answer after a "== reviewer N: ..." line. Exit 0 when at least one answer
+# is valid, 6 when the working tree changed (all answers rejected), 7 when every reviewer
+# timed out, otherwise 4.
+function Invoke-ChallengeAsk([string[]] $A) {
+  $limit = if ($env:SPARRING_REVIEW_TIMEOUT) { $env:SPARRING_REVIEW_TIMEOUT } else { '540' }
+  $only = ''
+  while ($A.Count -gt 0 -and $A[0] -like '--*') {
+    switch ($A[0]) {
+      '--timeout' {
+        if ($A.Count -lt 2) { Die '--timeout needs a number of seconds' }
+        $limit = $A[1]; $A = @($A | Select-Object -Skip 2)
+      }
+      '--only' {
+        if ($A.Count -lt 2 -or $A[1] -notmatch '^[1-9][0-9]*(,[1-9][0-9]*)*$') { Die '--only needs reviewer numbers, e.g. 2 or 1,3' }
+        $only = $A[1]; $A = @($A | Select-Object -Skip 2)
+      }
+      default { Die "unknown option: $($A[0])" }
+    }
+  }
+  if ("$limit" -notmatch '^[1-9][0-9]*$') { Die 'timeout must be a positive number of seconds' }
+  $limit = [int] $limit
+  if ($A.Count -lt 2) { Die 'usage: challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...' }
+  if ($A[0] -ne '1' -and $A[0] -ne '2') { Die 'challenge round must be 1 or 2' }
+  $r = [int] $A[0]
+  if (-not (Test-Path "$ChDir/reviews.tsv")) { Die "run 'review.ps1 challenge init' first" 2 }
+  if (-not (Test-NonEmpty "$ChDir/brief.md")) { Die "$ChDir/brief.md is missing; write the question and the evidence there first" 2 }
+  if ($r -eq 2 -and -not (Test-NonEmpty "$ChDir/reply.md")) { Die "$ChDir/reply.md is missing; write your conclusion and replies there first" 2 }
+  $skills = Split-Path -Parent (Split-Path -Parent $ScriptDir)
+  $schemaFile = if ($r -eq 1) { 'challenge.schema.json' } else { 'challenge-reply.schema.json' }
+  $schema = Join-Path $skills "challenge\$schemaFile"
+  if (-not (Test-Path $schema)) { Die "schema not found: $schema" 2 }
+
+  # Reviewers are numbered from 1 in the order given, in both rounds.
+  $slots = @(); $num = 0
+  foreach ($e in @($A | Select-Object -Skip 1)) {
+    $num++
+    $s = Split-Entry $e $num
+    $slots += $s
+    if ($only -and (",$only," -notlike "*,$num,*")) { continue }
+    if ($r -eq 2 -and -not (Test-NonEmpty "$ChDir/round-1.$num.answer.json")) {
+      [Console]::Error.WriteLine("note: reviewer $num ($($s.Label)) has no round 1 answer; skipped"); continue
+    }
+    $s.State = 'run'
+  }
+
+  $before = Get-TreeState
+  $env:SPARRING_REVIEW_TIMEOUT = "$limit"
+  $started = Get-Date
+  foreach ($s in $slots) {
+    if ($s.State -ne 'run') { continue }
+    $tag = "$ChDir/round-$r.$($s.Num)"
+    Write-ChallengePrompt $r $s.Num $s.Run (Join-Path $top "$tag.prompt.txt")
+    Remove-Item -Force -ErrorAction SilentlyContinue "$tag.answer.json"
+    $runDir = $top
+    if ($s.Run) {
+      $s.CopyDir = New-ReviewCopy
+      if (-not $s.CopyDir) {
+        [Console]::Error.WriteLine("error: could not make a disposable copy of the project for reviewer $($s.Num)")
+        $s.State = 'nocopy'; continue
+      }
+      $runDir = Join-Path $s.CopyDir 'project'
+    }
+    $env:SPARRING_ALLOW_COMMANDS = if ($s.Run) { '1' } else { '0' }
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $ScriptDir "reviewers\$($s.Tool).ps1"),
+                 $s.Model, $s.Effort, $schema, (Join-Path $top "$tag.answer.json"), (Join-Path $top "$tag.prompt.txt")) |
+      ForEach-Object { '"' + $_ + '"' }
+    $s.Proc = Start-Process -FilePath $PsHost -ArgumentList $argList -WorkingDirectory $runDir -NoNewWindow -PassThru `
+      -RedirectStandardError (Join-Path $top "$tag.$($s.Tool).log") -RedirectStandardOutput (Join-Path $top "$tag.$($s.Tool).stdout.log")
+    $null = $s.Proc.Handle   # keeps ExitCode readable after exit on Windows PowerShell 5.1
+  }
+
+  # One watchdog for all of them.
+  $deadline = $started.AddSeconds($limit)
+  while ($true) {
+    $running = $false
+    foreach ($s in $slots) {
+      if ($s.State -ne 'run') { continue }
+      if ($s.Proc.HasExited) { $s.Proc.WaitForExit(); $s.State = 'done'; $s.End = Get-Date } else { $running = $true }
+    }
+    if (-not $running) { break }
+    if ((Get-Date) -ge $deadline) {
+      foreach ($s in $slots) {
+        if ($s.State -ne 'run') { continue }
+        & taskkill /F /T /PID $s.Proc.Id *> $null
+        $s.State = 'timeout'; $s.End = Get-Date
+      }
+      break
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  foreach ($s in $slots) { Remove-ReviewCopy $s.CopyDir }
+
+  # A reviewer that changed the tree cannot be told apart from the others, so all are rejected.
+  $changed = (Get-TreeState) -ne $before
+
+  $TsvPath = Join-Path $top "$ChDir/reviews.tsv"   # read by Write-ReviewRecord, like the rest below
+  $n = $r
+  $ok = 0; $timeouts = 0; $others = 0; $report = @()
+  foreach ($s in $slots) {
+    if ($s.State -eq 'skip') { continue }
+    $tool = $s.Tool; $label = $s.Label; $model = $s.Model; $effort = $s.Effort; $kind = "challenge-$($s.Num)"
+    $finishedAt = if ($s.End) { $s.End } else { Get-Date }
+    $adapter = Join-Path $ScriptDir "reviewers\$tool.ps1"
+    $logFile = "$ChDir/round-$r.$($s.Num).$tool.log"
+    $outFile = "$ChDir/round-$r.$($s.Num).answer.json"
+    $json = $null
+    if ($s.State -eq 'timeout') {
+      $result = 'timeout'
+      [Console]::Error.WriteLine("error: reviewer $($s.Num) ($label) timed out after ${limit}s; last lines of ${logFile}:")
+      Get-Content $logFile -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { [Console]::Error.WriteLine($_) }
+    } elseif ($s.State -eq 'nocopy') {
+      $result = 'failed'
+    } elseif ($s.Proc.ExitCode -ne 0) {
+      $result = 'failed'
+      [Console]::Error.WriteLine("error: reviewer $($s.Num) ($label) failed (exit $($s.Proc.ExitCode)); last lines of ${logFile}:")
+      Get-Content $logFile -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { [Console]::Error.WriteLine($_) }
+    } elseif ($changed) {
+      $result = 'rejected'
+    } elseif (-not (Test-NonEmpty $outFile)) {
+      $result = 'invalid'; [Console]::Error.WriteLine("error: reviewer $($s.Num) ($label) produced no answer (see $logFile)")
+    } else {
+      $json = Get-ValidAnswer (Join-Path $top $outFile) $r
+      if ($null -eq $json) { $result = 'invalid'; [Console]::Error.WriteLine("error: reviewer $($s.Num) ($label) gave an invalid answer (see $outFile)") }
+      else { $result = 'ok' }
+    }
+    Write-ReviewRecord $result
+    switch ($result) { 'ok' { $ok++ } 'timeout' { $timeouts++ } default { $others++ } }
+    $report += "== reviewer $($s.Num): $label/${model}:$effort, $result =="
+    if ($result -eq 'ok') { $report += $json }
+  }
+  $report | ForEach-Object { Write-Output $_ }
+  if ($changed) {
+    [Console]::Error.WriteLine('error: the working tree changed while the reviewers ran; every answer is rejected. Inspect with: git status')
+    [Console]::Error.WriteLine('(If they are build or test artifacts, add them to .gitignore.)')
+    exit 6
+  }
+  if ($ok -gt 0) { return }
+  if ($timeouts -gt 0 -and $others -eq 0) { exit 7 }
+  exit 4
+}
+
+function Invoke-Challenge([string[]] $A) {
+  $sub = if ($A.Count -gt 0) { $A[0] } else { '' }
+  $rest = @($A | Select-Object -Skip 1)
+  switch ($sub) {
+    'init'  { Invoke-ChallengeInit $rest }
+    'ask'   { Invoke-ChallengeAsk $rest }
+    default { Die 'usage: review.ps1 challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...' }
+  }
+}
+
 $cmd = if ($args.Count -gt 0) { $args[0] } else { '' }
 $rest = @($args | Select-Object -Skip 1)
 switch ($cmd) {
@@ -617,5 +914,6 @@ switch ($cmd) {
   'status'  { Invoke-Status }
   'review'  { Invoke-Review $rest }
   'restore' { Invoke-Restore $rest }
-  default   { Die 'usage: review.ps1 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round>' }
+  'challenge' { Invoke-Challenge $rest }
+  default   { Die 'usage: review.ps1 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round> | challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...' }
 }

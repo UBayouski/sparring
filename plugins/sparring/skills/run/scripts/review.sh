@@ -30,6 +30,13 @@
 #       Put the working tree back exactly as it was before that review round's reviewer ran:
 #       files it changed or deleted come back, and files it created are removed.
 #
+#   review.sh challenge init [tools]
+#   review.sh challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...
+#       For the challenge skill: no code is changed. init checks the tools and starts a clean
+#       .sparring/challenge/ (the last one moves to .sparring/challenge-previous/). ask runs
+#       every reviewer at once on challenge/brief.md (round 1), or on the orchestrator's
+#       challenge/reply.md (round 2), and prints each answer. --only reruns some of them.
+#
 # Exit codes: 2 setup, 3 nothing to review, 4 reviewer failed or gave an invalid verdict,
 #             5 prerequisites missing, 6 reviewer changed files (changes are kept for you to
 #             inspect; undo them with "restore"), 7 reviewer timed out.
@@ -125,6 +132,23 @@ cmd_restore() {
   echo "restored the working tree to its state before the $tag review"
 }
 
+# Run the check for the reviewer tools in $1 (comma list; empty: any reviewer). Its output is
+# kept in CHECK_OUT. Exits 5 if something is missing.
+CHECK_OUT=""
+check_prereqs() {
+  local need="${1//+run/}"   # agy+run needs the same CLI as agy
+  # Run through bash so a lost executable bit cannot skip the check.
+  [[ -f "$CHECK" ]] || return 0
+  # agy has no sign-in status command, so when it is one of this run's reviewers, the check
+  # sends it one tiny test prompt (a few seconds) instead of failing on the first review.
+  # With no tools named ($2 = any), it checks agy that way too, so READY_REVIEWERS leaves out
+  # an agy that is not signed in.
+  local deep=""; [[ ",$need," == *,agy,* || ( -z "$need" && "${2:-}" == any ) ]] && deep=--deep
+  if ! CHECK_OUT="$(bash "$CHECK" $deep ${need:+--need "$need"} 2>&1)"; then
+    echo "$CHECK_OUT"; die "prerequisites missing; run /sparring:check" 5
+  fi
+}
+
 cmd_init() {
   local need="" rounds=3 tiebreaker=0
   while (($#)); do
@@ -135,17 +159,7 @@ cmd_init() {
       *)            need="$1"; shift ;;
     esac
   done
-  need="${need//+run/}"   # agy+run needs the same CLI as agy
-  # Run through bash so a lost executable bit cannot skip the check.
-  if [[ -f "$CHECK" ]]; then
-    local out
-    # agy has no sign-in status command, so when it is one of this run's reviewers, the check
-    # sends it one tiny test prompt (a few seconds) instead of failing on the first review.
-    local deep=""; [[ ",$need," == *,agy,* ]] && deep=--deep
-    if ! out="$(bash "$CHECK" $deep ${need:+--need "$need"} 2>&1)"; then
-      echo "$out"; die "prerequisites missing; run /sparring:check" 5
-    fi
-  fi
+  check_prereqs "$need"
   git rev-parse --verify HEAD >/dev/null 2>&1 || die "repository has no commits yet; make an initial commit first" 2
   mkdir -p "$STATE_DIR"
   # The state directory ignores itself, so the project's .gitignore stays untouched.
@@ -473,6 +487,10 @@ make_copy() {
     rm -rf "$dir"; return 1
   fi
   mkdir -p "$c/$STATE_DIR" && find "$STATE_DIR" -maxdepth 1 -type f -exec cp -p {} "$c/$STATE_DIR/" \;
+  if [[ -d "$STATE_DIR/challenge" ]]; then
+    mkdir -p "$c/$STATE_DIR/challenge" &&
+      find "$STATE_DIR/challenge" -maxdepth 1 -type f -exec cp -p {} "$c/$STATE_DIR/challenge/" \;
+  fi
   echo "$dir"
 }
 
@@ -480,7 +498,8 @@ make_copy() {
 # can say which model really ran, for how long and at what cost. Reads cmd_review's locals.
 # The adapter's --meta mode reads its own log for what the CLI reported (model=, tokens=).
 record_review() {
-  local result="$1" secs=$((SECONDS - started)) meta ran="$model" tokens="" attempts=1 m t a
+  local result="$1" secs=$(( ${finished:-$SECONDS} - started )) meta ran="$model" tokens="" attempts=1 m t a
+  local tsv="${TSV:-$STATE_DIR/reviews.tsv}"
   meta="$(bash "$SCRIPT_DIR/reviewers/$tool.sh" --meta "$log_file" 2>/dev/null | tr -d '\r')" || meta=""
   m="$(sed -n 's/^model=//p' <<< "$meta" | head -n 1)"
   t="$(sed -n 's/^tokens=//p' <<< "$meta" | tail -n 1)"
@@ -488,10 +507,9 @@ record_review() {
   [[ "$m" =~ ^[A-Za-z0-9._:/-]+$ ]] && ran="$m"
   [[ "$t" =~ ^[0-9]+$ ]] && tokens="$t"
   [[ "$a" =~ ^[1-9]$ ]] && attempts="$a"
-  [[ -f "$STATE_DIR/reviews.tsv" ]] ||
-    printf 'round\tkind\ttool\tmodel\teffort\tseconds\ttokens\tattempts\tresult\n' > "$STATE_DIR/reviews.tsv"
+  [[ -f "$tsv" ]] || printf 'round\tkind\ttool\tmodel\teffort\tseconds\ttokens\tattempts\tresult\n' > "$tsv"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$round" "$kind" "$label" "$ran" "$effort" "$secs" "${tokens:--}" "$attempts" "$result" \
-    >> "$STATE_DIR/reviews.tsv"
+    >> "$tsv"
   local tries=""; ((attempts > 1)) && tries=", $attempts attempts"
   echo "reviewer: $label, model $ran, effort $effort, ${secs}s, tokens ${tokens:-not reported}$tries, $result" >&2
 }
@@ -652,10 +670,330 @@ EOF
   echo
 }
 
+# ---- challenge: independent reviewers answer one question; no code is changed ---------------
+
+CH_DIR="$STATE_DIR/challenge"
+
+# Split a reviewer entry tool[+run]/model:effort into E_TOOL, E_MODEL and E_EFFORT. A bare tool
+# name (agy, agy+run:high) means its default model; without a tool, codex. Effort defaults to high.
+parse_entry() {
+  local e="$1" rest head
+  E_TOOL=codex E_MODEL=default E_EFFORT=high
+  if [[ "$e" == */* ]]; then
+    E_TOOL="${e%%/*}"; rest="${e#*/}"
+  else
+    head="${e%%:*}"
+    if [[ "${head%+run}" =~ ^[a-z0-9-]+$ && -f "$SCRIPT_DIR/reviewers/${head%+run}.sh" ]]; then
+      E_TOOL="$head"; rest="default${e:${#head}}"
+    else
+      rest="$e"
+    fi
+  fi
+  if [[ "$rest" =~ ^(.*):(minimal|low|medium|high|xhigh|max)$ ]]; then
+    rest="${BASH_REMATCH[1]}"; E_EFFORT="${BASH_REMATCH[2]}"
+  fi
+  [[ -n "$rest" ]] && E_MODEL="$rest"
+  [[ "${E_TOOL%+run}" =~ ^[a-z0-9-]+$ && -f "$SCRIPT_DIR/reviewers/${E_TOOL%+run}.sh" ]] ||
+    die "unknown reviewer tool in $e: ${E_TOOL%+run}"
+  [[ "$E_MODEL" =~ ^[A-Za-z0-9._:/-]+$ ]] || die "invalid model name in $e: $E_MODEL"
+  return 0
+}
+
+# Check a round 1 answer or a round 2 reply in file $1 (round $2) and unwrap an agy envelope in
+# place. Returns 0 valid, 1 invalid, 2 no JSON tool available.
+validate_answer() {
+  local f="$1" r="$2" tmp="$1.tmp"
+  if command -v jq >/dev/null 2>&1; then
+    jq -e --arg r "$r" '
+      (if type == "object" and has("structured_output") and (has("answer") or has("verdict") | not) then .structured_output else . end)
+      | if type != "object" then error("invalid")
+        elif $r == "1" then
+          (if (.answer | type) == "string" and (.findings | type) == "array" and (.unchecked | type) == "array"
+              and all(.findings[]; type == "object" and (.id | type) == "string") then . else error("invalid") end)
+        else
+          (if (.verdict == "agree" or .verdict == "disagree" or .verdict == "partly") and (.points | type) == "array"
+              and all(.points[]; type == "object" and (.id | type) == "string" and (.status == "stands" or .status == "withdrawn"))
+           then . else error("invalid") end)
+        end' "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  elif python3 -c '' >/dev/null 2>&1; then
+    python3 - "$f" "$tmp" "$r" <<'PY' || { rm -f "$tmp"; return 1; }
+import json, sys
+src, dst, r = sys.argv[1:4]
+try:
+    d = json.load(open(src, encoding="utf-8"))
+except ValueError:
+    sys.exit(1)
+if isinstance(d, dict) and "structured_output" in d and "answer" not in d and "verdict" not in d:
+    d = d["structured_output"]
+if not isinstance(d, dict):
+    sys.exit(1)
+if r == "1":
+    ok = (isinstance(d.get("answer"), str) and isinstance(d.get("findings"), list)
+          and isinstance(d.get("unchecked"), list)
+          and all(isinstance(i, dict) and isinstance(i.get("id"), str) for i in d["findings"]))
+else:
+    ok = (d.get("verdict") in ("agree", "disagree", "partly") and isinstance(d.get("points"), list)
+          and all(isinstance(i, dict) and isinstance(i.get("id"), str) and i.get("status") in ("stands", "withdrawn")
+                  for i in d["points"]))
+if not ok:
+    sys.exit(1)
+json.dump(d, open(dst, "w", encoding="utf-8"), ensure_ascii=False)
+PY
+  elif node -e '' >/dev/null 2>&1; then
+    node -e '
+      const fs = require("fs"); const [src, dst, r] = process.argv.slice(1);
+      let d; try { d = JSON.parse(fs.readFileSync(src, "utf8")); } catch { process.exit(1); }
+      if (d && typeof d === "object" && "structured_output" in d && !("answer" in d) && !("verdict" in d)) d = d.structured_output;
+      if (!d || typeof d !== "object") process.exit(1);
+      const ok = r === "1"
+        ? typeof d.answer === "string" && Array.isArray(d.findings) && Array.isArray(d.unchecked)
+          && d.findings.every(i => i && typeof i.id === "string")
+        : ["agree", "disagree", "partly"].includes(d.verdict) && Array.isArray(d.points)
+          && d.points.every(i => i && typeof i.id === "string" && ["stands", "withdrawn"].includes(i.status));
+      if (!ok) process.exit(1);
+      fs.writeFileSync(dst, JSON.stringify(d));' "$f" "$tmp" "$r" || { rm -f "$tmp"; return 1; }
+  else
+    return 2
+  fi
+  mv -f "$tmp" "$f"
+}
+
+# Write the prompt for one reviewer: <round> <reviewer number> <run mode 0|1> <prompt file>.
+# Like the review prompt, it holds no user text and no double quotes.
+challenge_prompt() {
+  local r="$1" s="$2" run="$3"
+  {
+    echo "You are an independent REVIEWER, asked to check a question with fresh eyes. Do not edit any files."
+    echo
+    echo "The question and the evidence are in the file $CH_DIR/brief.md. Read it, then read the code and files it names, and anything else in the project you need. You may run read-only commands such as tests or linters."
+    if ((run)); then
+      echo
+      echo "You are working in a disposable copy of the project, with its uncommitted changes applied. You may run tests, builds and linters there; whatever they change in the copy is thrown away. Files ignored by git, such as installed dependencies, are not in the copy; if a check cannot run for that reason, say so."
+    fi
+    if ((r == 1)); then
+      cat <<'EOF'
+
+Rules:
+- Reach your own answer from the evidence. Do not take the brief's framing on trust: if the question rests on a wrong premise, say so in answer.
+- If the brief states a claim to test, try hard to refute it before you accept it.
+- Every finding needs evidence: a file and line, a command and its output, or a quoted passage. Say when something is inferred rather than checked.
+- Give every finding an id like C1, C2.
+- Put what you could not verify, and why, in unchecked.
+- confidence high only when you checked the key facts yourself.
+EOF
+    else
+      cat <<EOF
+
+This is round 2. Your earlier answer is in the file $CH_DIR/round-1.$s.answer.json.
+The orchestrator's own conclusion, and its reply to your findings under the heading Reviewer $s, are in the file $CH_DIR/reply.md.
+
+Rules:
+- Judge the orchestrator's conclusion on the merits: verdict agree, disagree or partly.
+- For each of your earlier findings: status stands if it still holds after the reply, withdrawn if the reply answers it. Say why in comment.
+- Change your mind when the argument is good; do not drop a real problem to be agreeable.
+- You may add an important new point, with a new id and status stands.
+EOF
+    fi
+  } > "$4"
+}
+
+cmd_challenge() {
+  case "${1:-}" in
+    init) shift; challenge_init "$@" ;;
+    ask)  shift; challenge_ask "$@" ;;
+    *)    die "usage: $0 challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>..." ;;
+  esac
+}
+
+challenge_init() {
+  local a need=""
+  for a in "$@"; do
+    [[ "$a" != --* ]] || die "usage: $0 challenge init [tools]"
+    need="${need:+$need,}$a"   # codex,agy as one argument or as several
+  done
+  check_prereqs "$need" any
+  git rev-parse --verify HEAD >/dev/null 2>&1 || die "repository has no commits yet; make an initial commit first" 2
+  mkdir -p "$STATE_DIR"
+  printf '*\n' > "$STATE_DIR/.gitignore"
+  # A new challenge starts clean; the last one is kept in challenge-previous/.
+  if [[ -d "$CH_DIR" ]]; then
+    rm -rf "$STATE_DIR/challenge-previous"
+    # On Windows a folder cannot be renamed while a leftover process (say, from a reviewer
+    # that timed out) holds a file in it open; copy it instead, and clear what can be cleared.
+    if ! mv "$CH_DIR" "$STATE_DIR/challenge-previous" 2>/dev/null; then
+      cp -rp "$CH_DIR" "$STATE_DIR/challenge-previous" || die "could not keep the previous challenge"
+      rm -rf "$CH_DIR" 2>/dev/null || true
+      if [[ -n "$(ls -A "$CH_DIR" 2>/dev/null)" ]]; then
+        echo "warning: some files in $CH_DIR are in use and were left there: $(ls -A "$CH_DIR" | tr '\n' ' ')"
+      fi
+    fi
+    echo "previous challenge moved to $STATE_DIR/challenge-previous/"
+  fi
+  mkdir -p "$CH_DIR"
+  printf 'round\tkind\ttool\tmodel\teffort\tseconds\ttokens\tattempts\tresult\n' > "$CH_DIR/reviews.tsv"
+  echo "challenge: write the question and the evidence to $CH_DIR/brief.md, then run: challenge ask 1 <reviewers>"
+  grep '^READY_REVIEWERS:' <<< "$CHECK_OUT" || true
+  json_tool >/dev/null || echo "warning: no jq, python3 or node found; answers are not validated"
+  return 0
+}
+
+# Run every reviewer at once on the brief (round 1) or on the orchestrator's reply (round 2).
+# Prints each valid answer after a "== reviewer N: ..." line. Exit 0 when at least one answer
+# is valid, 6 when the working tree changed (all answers rejected), 7 when every reviewer
+# timed out, otherwise 4.
+challenge_ask() {
+  local limit="${SPARRING_REVIEW_TIMEOUT:-540}" only=""
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --timeout) [[ $# -ge 2 ]] || die "--timeout needs a number of seconds"; limit="$2"; shift 2 ;;
+      --only)    [[ "${2:-}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "--only needs reviewer numbers, e.g. 2 or 1,3"
+                 only="$2"; shift 2 ;;
+      *)         die "unknown option: $1" ;;
+    esac
+  done
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || die "timeout must be a positive number of seconds"
+  [[ $# -ge 2 ]] || die "usage: challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>..."
+  local round="$1"; shift
+  [[ "$round" == 1 || "$round" == 2 ]] || die "challenge round must be 1 or 2"
+  [[ -f "$CH_DIR/reviews.tsv" ]] || die "run '$0 challenge init' first" 2
+  [[ -s "$CH_DIR/brief.md" ]] || die "$CH_DIR/brief.md is missing; write the question and the evidence there first" 2
+  if ((round == 2)); then
+    [[ -s "$CH_DIR/reply.md" ]] || die "$CH_DIR/reply.md is missing; write your conclusion and replies there first" 2
+  fi
+  local schema="$SCRIPT_DIR/../../challenge/challenge.schema.json"
+  ((round == 2)) && schema="$SCRIPT_DIR/../../challenge/challenge-reply.schema.json"
+  [[ -f "$schema" ]] || die "schema not found: $schema" 2
+
+  # Reviewers are numbered from 1 in the order given, in both rounds.
+  local -a S_TOOL S_LABEL S_MODEL S_EFFORT S_RUN S_PID S_END S_STATE S_RC
+  local n=0 e slot
+  for e in "$@"; do
+    n=$((n + 1)); parse_entry "$e"
+    S_RUN[n]=0; [[ "$E_TOOL" == *+run ]] && S_RUN[n]=1
+    S_TOOL[n]="${E_TOOL%+run}"; S_LABEL[n]="$E_TOOL"; S_MODEL[n]="$E_MODEL"; S_EFFORT[n]="$E_EFFORT"
+    S_STATE[n]=skip; S_RC[n]=0; S_END[n]=0
+    if [[ -n "$only" && ",$only," != *",$n,"* ]]; then continue; fi
+    if ((round == 2)) && [[ ! -s "$CH_DIR/round-1.$n.answer.json" ]]; then
+      echo "note: reviewer $n (${S_LABEL[n]}) has no round 1 answer; skipped" >&2; continue
+    fi
+    S_STATE[n]=run
+  done
+
+  local before tag run_dir copy started=$SECONDS
+  before="$(tree_state)"
+  export SPARRING_REVIEW_TIMEOUT="$limit"
+  COPY_DIRS=()
+  trap 'rm -rf ${COPY_DIRS[@]+"${COPY_DIRS[@]}"}' EXIT
+  for ((slot = 1; slot <= n; slot++)); do
+    [[ "${S_STATE[slot]}" == run ]] || continue
+    tag="$CH_DIR/round-$round.$slot"
+    challenge_prompt "$round" "$slot" "${S_RUN[slot]}" "$tag.prompt.txt"
+    rm -f "$tag.answer.json"
+    run_dir="$PWD"
+    if ((S_RUN[slot])); then
+      if ! copy="$(make_copy)"; then
+        echo "error: could not make a disposable copy of the project for reviewer $slot" >&2
+        S_STATE[slot]=nocopy; continue
+      fi
+      COPY_DIRS+=("$copy"); run_dir="$copy/project"
+    fi
+    (cd "$run_dir" && SPARRING_ALLOW_COMMANDS="${S_RUN[slot]}" exec bash "$SCRIPT_DIR/reviewers/${S_TOOL[slot]}.sh" \
+       "${S_MODEL[slot]}" "${S_EFFORT[slot]}" "$schema" "$OLDPWD/$tag.answer.json" "$OLDPWD/$tag.prompt.txt") \
+      >"$tag.${S_TOOL[slot]}.log" 2>&1 </dev/null &
+    S_PID[slot]=$!
+  done
+
+  # One watchdog for all of them.
+  local waited=0 running rc
+  while :; do
+    running=0
+    for ((slot = 1; slot <= n; slot++)); do
+      [[ "${S_STATE[slot]}" == run ]] || continue
+      if kill -0 "${S_PID[slot]}" 2>/dev/null; then
+        running=1
+      else
+        rc=0; wait "${S_PID[slot]}" || rc=$?
+        S_RC[slot]=$rc; S_END[slot]=$SECONDS; S_STATE[slot]=done
+      fi
+    done
+    ((running)) || break
+    if ((waited >= limit)); then
+      for ((slot = 1; slot <= n; slot++)); do
+        [[ "${S_STATE[slot]}" == run ]] || continue
+        kill_tree "${S_PID[slot]}"; wait "${S_PID[slot]}" 2>/dev/null || true
+        S_STATE[slot]=timeout; S_END[slot]=$SECONDS
+      done
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  rm -rf ${COPY_DIRS[@]+"${COPY_DIRS[@]}"}; COPY_DIRS=()
+
+  # A reviewer that changed the tree cannot be told apart from the others, so all are rejected.
+  local changed=0
+  [[ "$(tree_state)" != "$before" ]] && changed=1
+
+  local TSV="$CH_DIR/reviews.tsv" tool label model effort kind finished log_file out result v
+  local ok=0 timeouts=0 others=0 report=""
+  for ((slot = 1; slot <= n; slot++)); do
+    [[ "${S_STATE[slot]}" == skip ]] && continue
+    tool="${S_TOOL[slot]}" label="${S_LABEL[slot]}" model="${S_MODEL[slot]}" effort="${S_EFFORT[slot]}"
+    kind="challenge-$slot" finished="${S_END[slot]}"
+    ((finished > 0)) || finished=$SECONDS
+    log_file="$CH_DIR/round-$round.$slot.$tool.log" out="$CH_DIR/round-$round.$slot.answer.json"
+    case "${S_STATE[slot]}" in
+      timeout) result=timeout
+               echo "error: reviewer $slot ($label) timed out after ${limit}s; last lines of $log_file:" >&2
+               tail -n 20 "$log_file" >&2 ;;
+      nocopy)  result=failed ;;
+      *)
+        if ((S_RC[slot] != 0)); then
+          result=failed
+          echo "error: reviewer $slot ($label) failed (exit ${S_RC[slot]}); last lines of $log_file:" >&2
+          tail -n 20 "$log_file" >&2
+        elif ((changed)); then
+          result=rejected
+        elif [[ ! -s "$out" ]]; then
+          result=invalid; echo "error: reviewer $slot ($label) produced no answer (see $log_file)" >&2
+        else
+          v=0; validate_answer "$out" "$round" || v=$?
+          case "$v" in
+            0) result=ok ;;
+            1) result=invalid; echo "error: reviewer $slot ($label) gave an invalid answer (see $out)" >&2 ;;
+            *) if grep -q '"answer"\|"verdict"' "$out"; then
+                 result=ok; echo "warning: no JSON tool (jq, python3 or node) found; answer not validated" >&2
+               else
+                 result=invalid; echo "error: reviewer $slot ($label) gave no answer (see $out)" >&2
+               fi ;;
+          esac
+        fi ;;
+    esac
+    record_review "$result"
+    case "$result" in
+      ok)      ok=$((ok + 1)) ;;
+      timeout) timeouts=$((timeouts + 1)) ;;
+      *)       others=$((others + 1)) ;;
+    esac
+    report+="== reviewer $slot: $label/$model:$effort, $result =="$'\n'
+    [[ "$result" == ok ]] && report+="$(cat "$out")"$'\n'
+  done
+  printf '%s' "$report"
+  if ((changed)); then
+    echo "error: the working tree changed while the reviewers ran; every answer is rejected. Inspect with: git status" >&2
+    echo "(If they are build or test artifacts, add them to .gitignore.)" >&2
+    exit 6
+  fi
+  ((ok > 0)) && return 0
+  ((n > 0 && timeouts > 0 && others == 0)) && exit 7
+  exit 4
+}
+
 case "${1:-}" in
+  challenge) shift; cmd_challenge "$@" ;;
   init)    shift; cmd_init "$@" ;;
   status)  shift; cmd_status "$@" ;;
   review)  shift; cmd_review "$@" ;;
   restore) shift; cmd_restore "$@" ;;
-  *) die "usage: $0 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round>" ;;
+  *) die "usage: $0 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round> | challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>..." ;;
 esac

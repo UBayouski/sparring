@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "comment", "points"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["agree", "disagree", "partly"],
+      "description": "Your judgement of the orchestrator's conclusion."
+    },
+    "comment": {
+      "type": "string",
+      "description": "Why, in a few sentences. Name the point that decides it."
+    },
+    "points": {
+      "type": "array",
+      "description": "Each of your earlier findings, plus any new ones.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "comment"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The finding's id from your earlier answer, or a new id."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["stands", "withdrawn"]
+          },
+          "comment": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

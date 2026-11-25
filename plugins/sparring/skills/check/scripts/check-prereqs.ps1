@@ -191,4 +191,4 @@ $readyText = if ($ready.Count) { $ready -join ' ' } else { 'none' }
 if ($missing.Count -gt 0) { Write-Output "RESULT: missing $($missing -join ' ')"; Write-Output "READY_REVIEWERS: $readyText"; exit 1 }
 Write-Output 'RESULT: ready'
 Write-Output "READY_REVIEWERS: $readyText"
-Write-Output 'NEXT: only the user can start the loop, by typing /sparring:run <task>'
+Write-Output 'NEXT: only the user can start sparring, by typing /sparring:run <task> or /sparring:challenge <question>'
