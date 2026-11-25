@@ -163,8 +163,10 @@ check "+run: no plan mode, no no-commands note" '! grep -qx plan "$FAKE_ARGS" &&
 check "+run: prompt says it is a copy"     'grep -q "disposable copy of the project" .sparring/round-1.tiebreak.prompt.txt'
 check "+run: copy removed afterwards"      '[[ -n "$copy_dir" && ! -d "$copy_dir" ]]'
 check "+run: recorded as agy+run"          'tail -n 1 .sparring/reviews.tsv | grep -qP "^1\ttiebreak\tagy\+run\tdefault\tlow\t"'
-"$REVIEW" review 1 agy default low </dev/null >/dev/null
-check "plain agy still in the project, plan mode" '[[ "$(cat "$FAKE_ARGS.cwd")" == "$(pwd -P)" ]] && grep -qx plan "$FAKE_ARGS"'
+rm -f "$FAKE_ARGS.cwd"   # so a review that fails early cannot pass on the copy's folder
+out="$("$REVIEW" review 1 agy default low 2>&1 </dev/null)"; code=$?
+check "plain agy: review ok"               '[[ $code -eq 0 ]] || { echo "exit $code: $out" | tail -n 5 >&2; false; }'
+check "plain agy still in the project, plan mode" '[[ "$(cat "$FAKE_ARGS.cwd" 2>/dev/null)" == "$(pwd -P)" ]] && grep -qx plan "$FAKE_ARGS"'
 "$REVIEW" review 1 codex default medium </dev/null >/dev/null   # put round 1 back
 
 echo "safety"

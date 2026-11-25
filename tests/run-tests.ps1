@@ -208,8 +208,12 @@ try {
   Test-That '+run: prompt says it is a copy' ((Get-Content -Raw .sparring\round-1.tiebreak.prompt.txt) -match 'disposable copy of the project')
   Test-That '+run: copy removed afterwards' ($copyDir -and -not (Test-Path -LiteralPath $copyDir))
   Test-That '+run: recorded as agy+run' ((Get-Content .sparring\reviews.tsv)[-1] -match "^1`ttiebreak`tagy\+run`tdefault`tlow`t")
-  $null = Invoke-Rev review 1 agy default low
-  Test-That 'plain agy still in the project, plan mode' ((Get-Content "$env:FAKE_ARGS.cwd" | Select-Object -First 1).Trim() -eq (Get-Location).Path -and (Get-FakeArgs) -contains 'plan')
+  Remove-Item "$env:FAKE_ARGS.cwd" -ErrorAction SilentlyContinue   # so a review that fails early cannot pass on the copy's folder
+  $out = Invoke-RevErr review 1 agy default low
+  if ($code -ne 0) { [Console]::Error.WriteLine("exit ${code}: " + (($out -split "`n") | Select-Object -Last 5) -join "`n") }
+  Test-That 'plain agy: review ok' ($code -eq 0)
+  $cwd = if (Test-Path "$env:FAKE_ARGS.cwd") { (Get-Content "$env:FAKE_ARGS.cwd" | Select-Object -First 1).Trim() } else { '' }
+  Test-That 'plain agy still in the project, plan mode' ($cwd -eq (Get-Location).Path -and (Get-FakeArgs) -contains 'plan')
   $null = Invoke-Rev review 1 codex default medium   # put round 1 back
 
   'verdict validation'
