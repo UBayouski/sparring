@@ -54,7 +54,9 @@ and `run_in_background: true`; wait for the completion notification and read its
    `reviewer=` (for example `codex,agy`). Without `reviewer=`, run `CHALLENGE init` with no
    tools, and use one `<tool>/default:high` entry for each tool on its `READY_REVIEWERS:`
    line. If only one is ready, use it, and say in the report that only one reviewer was
-   available.
+   available. When answering needs something run (tests at a commit, a reproduction), use
+   `agy+run` in place of `agy`; if the user's `reviewer=` has plain `agy` for such a question,
+   keep it, and say in the report that `agy+run` could have run it.
    - If it reports missing prerequisites, run the `sparring:check` skill to fix them, then
      run `CHALLENGE init` again. Stop if they are still missing.
    - If it reports no commits, tell the user and stop.
@@ -70,6 +72,9 @@ project, so make it complete and neutral:
   claim to test; the reviewers are told to try to refute it.
 - **The evidence**: file paths with line ranges, commands with their output, error messages,
   log excerpts. Save long outputs as extra files in `.sparring/challenge/` and name them.
+  The reviewers have no network: Codex's sandbox blocks it and `agy` runs no commands. Save
+  anything fetched online (CI logs, pull request or issue data, `gh` output) as files there
+  too, and say where each one came from.
 - **The code the evidence depends on**: helper functions, callers, config, the tests that
   cover it. A brief that leaves them out costs the reviewers a round of guessing.
 - **Scope**: what is out of scope, and what you already ruled out, with how.

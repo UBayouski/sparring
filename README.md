@@ -161,7 +161,8 @@ diagnosis, an analysis, a design decision, "is this safe". Nobody changes code.
 Two reviewers from different vendors are worth more than one: their findings often differ,
 and in follow-up rounds one may withdraw a point while the other keeps it, with evidence.
 Use `agy+run` when an answer needs running code, such as tests or a quick probe script.
-Files are in `.sparring/challenge/`, and the challenge before that in
+The reviewers have no network, so Claude saves anything it fetched online (CI logs, pull
+request data) into the brief's folder for them. Files are in `.sparring/challenge/`, and the challenge before that in
 `.sparring/challenge-previous/`. A challenge never touches the files of a `run`.
 
 ## What happens in a run
