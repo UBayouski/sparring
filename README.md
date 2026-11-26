@@ -157,13 +157,17 @@ diagnosis, an analysis, a design decision, "is this safe". Nobody changes code.
 |---|---|---|
 | `reviewer=` | Reviewers, as `tool/model:effort`; a bare tool name such as `agy` or `agy+run:medium` works too | one `<tool>/default:high` per ready tool, e.g. `codex/default:high,agy/default:high` |
 | `rounds=` | `2` allows the follow-up round, `1` stops after the first answers | `2` |
+| `at=` | A commit: every reviewer works in a clean throwaway copy of it, without uncommitted changes, notes or later commits. Claude also sets it on its own when the question is about a past commit or the working tree could lead the reviewers | none: reviewers read the live project |
 
 Two reviewers from different vendors are worth more than one: their findings often differ,
 and in follow-up rounds one may withdraw a point while the other keeps it, with evidence.
 Use `agy+run` when an answer needs running code, such as tests or a quick probe script.
 The reviewers have no network, so Claude saves anything it fetched online (CI logs, pull
-request data) into the brief's folder for them. Files are in `.sparring/challenge/`, and the challenge before that in
-`.sparring/challenge-previous/`. A challenge never touches the files of a `run`.
+request data) into the brief's folder for them. Two reviewers at `high` cost several times
+one: for a question one log line already settles, `reviewer=codex/default:medium` is enough,
+and the challenge is best kept for decisions that are open or costly to get wrong. Files are
+in `.sparring/challenge/`, and the challenge before that in `.sparring/challenge-previous/`.
+A challenge never touches the files of a `run`.
 
 ## What happens in a run
 

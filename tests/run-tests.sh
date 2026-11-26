@@ -28,6 +28,10 @@ printf '%s\n' "\$@" > "\$FAKE_ARGS"
 [[ -n "\${FAKE_CREATE:-}" ]] && echo created > "\$FAKE_CREATE"
 [[ -n "\${FAKE_DELETE:-}" ]] && rm -f "\$FAKE_DELETE"
 [[ -n "\${FAKE_SLEEP:-}" ]] && sleep "\$FAKE_SLEEP"
+# Where it ran, and what it saw there: a.py's last line, .sparring's entries, branch count.
+pwd -P > "\$FAKE_ARGS.ccwd"
+printf '%s|%s|%s' "\$(tail -n 1 a.py 2>/dev/null)" "\$(ls -A .sparring 2>/dev/null | tr '\n' ' ')" \
+  "\$(git for-each-ref refs/heads refs/remotes 2>/dev/null | wc -l | tr -d ' ')" > "\$FAKE_ARGS.ccopy"
 echo "model: gpt-fake" >&2; printf 'tokens used\n1,234\n' >&2   # what codex exec logs
 out=""; while ((\$#)); do [[ "\$1" == -o ]] && out="\$2"; shift; done
 if [[ "\$out" == *answer.json ]]; then   # challenge
@@ -59,7 +63,7 @@ fi
 out='$APPROVE'
 [[ "\$2" == *"check a question"* ]] && out='$ANSWER'
 [[ "\$2" == *"check a question"*"This is round 2"* ]] && out='$REPLY'
-echo "{\"status\":\"SUCCESS\",\"response\":\"...\",\"structured_output\":\$out,\"usage\":{\"total_tokens\":1}}"
+echo "{\"conversation_id\":\"fake-conv-1\",\"status\":\"SUCCESS\",\"response\":\"...\",\"structured_output\":\$out,\"usage\":{\"total_tokens\":1}}"
 EOF
 chmod +x "$T/bin/codex" "$T/bin/agy"
 export PATH="$T/bin:$PATH" FAKE_ARGS="$T/args"
@@ -288,6 +292,29 @@ out="$("$REVIEW" challenge init codex </dev/null 2>&1)"
 check "init keeps the last challenge"      '[[ "$out" == *"previous challenge moved"* && -f .sparring/challenge-previous/brief.md && ! -f .sparring/challenge/brief.md ]]'
 out="$(FAKE_AGY_PROBE_EXIT=1 FAKE_AGY_PROBE="auth required" "$REVIEW" challenge init </dev/null 2>&1)"; code=$?
 check "no tools: a signed-out agy is left out" '[[ $code -eq 0 && "$out" == *"READY_REVIEWERS: codex"* && "$out" != *"READY_REVIEWERS: codex agy"* ]]'
+
+echo "challenge --at (clean copy of a commit)"
+head_sha="$(git rev-parse HEAD)"
+out="$("$REVIEW" challenge init --at HEAD codex,agy </dev/null 2>&1)"; code=$?
+check "--at: commit saved"                 '[[ $code -eq 0 && "$(cat .sparring/challenge/at)" == "$head_sha" && "$out" == *"clean copy of commit ${head_sha:0:12}"* ]]'
+"$REVIEW" challenge init --at nosuchrev codex </dev/null >/dev/null 2>&1; code=$?
+check "--at: a bad commit is refused"      '[[ $code -eq 2 ]]'
+"$REVIEW" challenge init --at HEAD codex,agy </dev/null >/dev/null 2>&1
+echo "Why does x stay 1?" > .sparring/challenge/brief.md
+echo "a dirty line" >> a.py   # an uncommitted change the reviewers must not see
+rm -f "$FAKE_ARGS.ccwd" "$T/agyargs.cwd"
+out="$(FAKE_AGY_ARGS="$T/agyargs" "$REVIEW" challenge ask 1 codex agy </dev/null 2>"$T/err")"; code=$?
+ccwd="$(cat "$FAKE_ARGS.ccwd" 2>/dev/null)" acwd="$(cat "$T/agyargs.cwd" 2>/dev/null)"
+check "--at: both answered"                '[[ $code -eq 0 && "$out" == *"reviewer 1: codex/default:high, ok"* && "$out" == *"reviewer 2: agy/default:high, ok"* ]]'
+check "--at: codex ran in a copy too"      '[[ "$ccwd" == */sparring-copy.*/project && "$acwd" == */sparring-copy.*/project && "$ccwd" != "$acwd" ]]'
+check "--at: copy is the commit alone"     '[[ "$(cat "$FAKE_ARGS.ccopy")" == "$(git show HEAD:a.py | tail -n 1)|challenge |0" ]]'
+check "--at: plain agy still in plan mode" 'grep -qx plan "$T/agyargs"'
+check "--at: prompt names the commit"      'grep -q "at commit $head_sha, with no uncommitted changes" .sparring/challenge/round-1.1.prompt.txt'
+check "--at: copies removed afterwards"    '[[ -n "$ccwd" && ! -d "$(dirname "$ccwd")" && ! -d "$(dirname "$acwd")" ]]'
+mkdir -p "$T/agyhome/brain/fake-conv-1/.system_generated/logs"
+printf '{"model":"gemini-fake-low"}\n{"model":"gemini-fake-high"}\n' > "$T/agyhome/brain/fake-conv-1/.system_generated/logs/transcript_full.jsonl"
+SPARRING_AGY_HOME="$T/agyhome" FAKE_AGY_ARGS="$T/agyargs" "$REVIEW" challenge ask --only 2 1 codex agy </dev/null >/dev/null 2>&1
+check "agy: model read from its transcript" 'tail -n 1 .sparring/challenge/reviews.tsv | grep -qP "^1\tchallenge-2\tagy\tgemini-fake-high\thigh\t"'
 git checkout -q -- a.py
 
 echo "status"

@@ -30,12 +30,13 @@
 #       Put the working tree back exactly as it was before that review round's reviewer ran:
 #       files it changed or deleted come back, and files it created are removed.
 #
-#   review.sh challenge init [tools]
+#   review.sh challenge init [--at <commit>] [tools]
 #   review.sh challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...
 #       For the challenge skill: no code is changed. init checks the tools and starts a clean
 #       .sparring/challenge/ (the last one moves to .sparring/challenge-previous/). ask runs
 #       every reviewer at once on challenge/brief.md (round 1), or on the orchestrator's
 #       challenge/reply.md (round 2), and prints each answer. --only reruns some of them.
+#       init --at <commit> puts every reviewer in a clean disposable copy of that commit.
 #
 # Exit codes: 2 setup, 3 nothing to review, 4 reviewer failed or gave an invalid verdict,
 #             5 prerequisites missing, 6 reviewer changed files (changes are kept for you to
@@ -471,13 +472,25 @@ cmd_status() {
 # clone at HEAD (its own refs and config, so nothing done there reaches this repo), with the
 # developer's changed, new and deleted files applied byte for byte, plus the state files the
 # prompt names. Ignored files (node_modules, virtualenvs, .env) are not copied.
+# With a commit (challenge --at), the copy is that commit alone: no uncommitted changes, no run
+# state, no branches or remotes pointing past it; only the challenge files are added.
 make_copy() {
-  local dir c f
+  local at="${1:-}" dir c f
   dir="$(mktemp -d "${TMPDIR:-/tmp}/sparring-copy.XXXXXX")" || return 1
   c="$dir/project"
   if ! git clone --quiet --shared --no-checkout "$PWD" "$c" >/dev/null 2>&1 ||
-     ! git -C "$c" -c advice.detachedHead=false checkout --quiet --detach "$(git rev-parse HEAD)" >/dev/null 2>&1; then
+     ! git -C "$c" -c advice.detachedHead=false checkout --quiet --detach "${at:-$(git rev-parse HEAD)}" >/dev/null 2>&1; then
     rm -rf "$dir"; return 1
+  fi
+  if [[ -n "$at" ]]; then
+    git -C "$c" remote remove origin >/dev/null 2>&1
+    git -C "$c" for-each-ref --format='%(refname)' refs/heads refs/remotes |
+      while IFS= read -r f; do git -C "$c" update-ref -d "$f"; done
+    git -C "$c" for-each-ref --format='%(refname)' refs/tags | while IFS= read -r f; do
+      git -C "$c" merge-base --is-ancestor "$f" HEAD 2>/dev/null || git -C "$c" update-ref -d "$f"
+    done
+    mkdir -p "$c/$CH_DIR" && find "$CH_DIR" -maxdepth 1 -type f -exec cp -p {} "$c/$CH_DIR/" \; || { rm -rf "$dir"; return 1; }
+    echo "$dir"; return 0
   fi
   git ls-files -z -d -- . ":(exclude)$STATE_DIR" | while IFS= read -r -d '' f; do rm -f -- "$c/$f"; done
   if ! git ls-files -z -m -o --exclude-standard -- . ":(exclude)$STATE_DIR" | while IFS= read -r -d '' f; do
@@ -761,12 +774,15 @@ PY
 # Write the prompt for one reviewer: <round> <reviewer number> <run mode 0|1> <prompt file>.
 # Like the review prompt, it holds no user text and no double quotes.
 challenge_prompt() {
-  local r="$1" s="$2" run="$3"
+  local r="$1" s="$2" run="$3" at="${5:-}"
   {
     echo "You are an independent REVIEWER, asked to check a question with fresh eyes. Do not edit any files."
     echo
     echo "The question and the evidence are in the file $CH_DIR/brief.md. Read it, then read the code and files it names, and anything else in the project you need. You may run read-only commands such as tests or linters."
-    if ((run)); then
+    if [[ -n "$at" ]]; then
+      echo
+      echo "You are working in a disposable copy of the project at commit $at, with no uncommitted changes and no later commits. Judge the project as of that commit.$( ((run)) && echo ' You may run tests, builds and linters there; whatever they change in the copy is thrown away. Files ignored by git, such as installed dependencies, are not in the copy; if a check cannot run for that reason, say so.')"
+    elif ((run)); then
       echo
       echo "You are working in a disposable copy of the project, with its uncommitted changes applied. You may run tests, builds and linters there; whatever they change in the copy is thrown away. Files ignored by git, such as installed dependencies, are not in the copy; if a check cannot run for that reason, say so."
     fi
@@ -801,18 +817,26 @@ cmd_challenge() {
   case "${1:-}" in
     init) shift; challenge_init "$@" ;;
     ask)  shift; challenge_ask "$@" ;;
-    *)    die "usage: $0 challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>..." ;;
+    *)    die "usage: $0 challenge init [--at <commit>] [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>..." ;;
   esac
 }
 
 challenge_init() {
-  local a need=""
-  for a in "$@"; do
-    [[ "$a" != --* ]] || die "usage: $0 challenge init [tools]"
+  local a need="" at="" usage="usage: $0 challenge init [--at <commit>] [tools]"
+  while [[ $# -gt 0 ]]; do
+    a="$1"; shift
+    if [[ "$a" == --at ]]; then
+      [[ $# -ge 1 && -n "$1" && "$1" != -* ]] || die "$usage"
+      at="$1"; shift; continue
+    fi
+    [[ "$a" != --* ]] || die "$usage"
     need="${need:+$need,}$a"   # codex,agy as one argument or as several
   done
   check_prereqs "$need" any
   git rev-parse --verify HEAD >/dev/null 2>&1 || die "repository has no commits yet; make an initial commit first" 2
+  if [[ -n "$at" ]]; then
+    a="$at"; at="$(git rev-parse --verify --quiet "$a^{commit}")" || die "not a commit: $a" 2
+  fi
   mkdir -p "$STATE_DIR"
   printf '*\n' > "$STATE_DIR/.gitignore"
   # A new challenge starts clean; the last one is kept in challenge-previous/.
@@ -831,6 +855,10 @@ challenge_init() {
   fi
   mkdir -p "$CH_DIR"
   printf 'round\tkind\ttool\tmodel\teffort\tseconds\ttokens\tattempts\tresult\n' > "$CH_DIR/reviews.tsv"
+  if [[ -n "$at" ]]; then
+    printf '%s\n' "$at" > "$CH_DIR/at"
+    echo "challenge: every reviewer works in a clean copy of commit ${at:0:12}"
+  fi
   echo "challenge: write the question and the evidence to $CH_DIR/brief.md, then run: challenge ask 1 <reviewers>"
   grep '^READY_REVIEWERS:' <<< "$CHECK_OUT" || true
   json_tool >/dev/null || echo "warning: no jq, python3 or node found; answers are not validated"
@@ -879,6 +907,11 @@ challenge_ask() {
     S_STATE[n]=run
   done
 
+  # challenge init --at: every reviewer, not only +run ones, gets a clean copy of that commit.
+  local at=""
+  [[ -s "$CH_DIR/at" ]] && at="$(tr -d '\r\n' < "$CH_DIR/at")"
+  [[ -z "$at" ]] || git rev-parse --verify --quiet "$at^{commit}" >/dev/null || die "commit $at from $CH_DIR/at is gone" 2
+
   local before tag run_dir copy started=$SECONDS
   before="$(tree_state)"
   export SPARRING_REVIEW_TIMEOUT="$limit"
@@ -887,11 +920,11 @@ challenge_ask() {
   for ((slot = 1; slot <= n; slot++)); do
     [[ "${S_STATE[slot]}" == run ]] || continue
     tag="$CH_DIR/round-$round.$slot"
-    challenge_prompt "$round" "$slot" "${S_RUN[slot]}" "$tag.prompt.txt"
+    challenge_prompt "$round" "$slot" "${S_RUN[slot]}" "$tag.prompt.txt" "$at"
     rm -f "$tag.answer.json"
     run_dir="$PWD"
-    if ((S_RUN[slot])); then
-      if ! copy="$(make_copy)"; then
+    if ((S_RUN[slot])) || [[ -n "$at" ]]; then
+      if ! copy="$(make_copy "$at")"; then
         echo "error: could not make a disposable copy of the project for reviewer $slot" >&2
         S_STATE[slot]=nocopy; continue
       fi
@@ -995,5 +1028,5 @@ case "${1:-}" in
   status)  shift; cmd_status "$@" ;;
   review)  shift; cmd_review "$@" ;;
   restore) shift; cmd_restore "$@" ;;
-  *) die "usage: $0 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round> | challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>..." ;;
+  *) die "usage: $0 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round> | challenge init [--at <commit>] [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>..." ;;
 esac

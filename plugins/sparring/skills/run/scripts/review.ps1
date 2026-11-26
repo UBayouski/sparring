@@ -5,7 +5,7 @@
 #   review.ps1 status
 #   review.ps1 review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file]
 #   review.ps1 restore [--tiebreak] <round>
-#   review.ps1 challenge init [tools]
+#   review.ps1 challenge init [--at <commit>] [tools]
 #   review.ps1 challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...
 #
 # Exit codes: 2 setup, 3 nothing to review, 4 reviewer failed or gave an invalid verdict,
@@ -409,15 +409,31 @@ function Invoke-Status {
 # clone at HEAD (its own refs and config, so nothing done there reaches this repo), with the
 # developer's changed, new and deleted files applied byte for byte, plus the state files the
 # prompt names. Ignored files (node_modules, virtualenvs, .env) are not copied.
-function New-ReviewCopy {
+# With a commit (challenge --at), the copy is that commit alone: no uncommitted changes, no run
+# state, no branches or remotes pointing past it; only the challenge files are added.
+function New-ReviewCopy([string] $At = '') {
   $dir = Join-Path ([System.IO.Path]::GetTempPath()) ('sparring-copy.' + [guid]::NewGuid().ToString('N').Substring(0, 8))
   $c = Join-Path $dir 'project'
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   & git clone --quiet --shared --no-checkout $top $c *> $null
   if ($LASTEXITCODE -ne 0) { Remove-ReviewCopy $dir; return $null }
-  $head = (& git rev-parse HEAD)
+  $head = if ($At) { $At } else { (& git rev-parse HEAD) }
   & git -C $c -c advice.detachedHead=false checkout --quiet --detach $head *> $null
   if ($LASTEXITCODE -ne 0) { Remove-ReviewCopy $dir; return $null }
+  if ($At) {
+    try {
+      & git -C $c remote remove origin *> $null
+      foreach ($ref in @(& git -C $c for-each-ref --format='%(refname)' refs/heads refs/remotes)) { & git -C $c update-ref -d $ref *> $null }
+      foreach ($ref in @(& git -C $c for-each-ref --format='%(refname)' refs/tags)) {
+        & git -C $c merge-base --is-ancestor $ref HEAD *> $null
+        if ($LASTEXITCODE -ne 0) { & git -C $c update-ref -d $ref *> $null }
+      }
+      $chCopy = Join-Path $c $ChDir
+      New-Item -ItemType Directory -Force -Path $chCopy | Out-Null
+      Get-ChildItem -LiteralPath (Join-Path $top $ChDir) -File -Force | Copy-Item -Destination $chCopy -Force -ErrorAction Stop
+    } catch { Remove-ReviewCopy $dir; return $null }
+    return $dir
+  }
   try {
     foreach ($f in (Get-ZList @('ls-files', '-z', '-d', '--', '.', $Exclude))) {
       Remove-Item -Force -LiteralPath (Join-Path $c $f) -ErrorAction SilentlyContinue
@@ -690,13 +706,17 @@ function Get-ValidAnswer([string] $Path, [int] $Round) {
 }
 
 # The prompt for one reviewer. Like the review prompt, it holds no user text and no double quotes.
-function Write-ChallengePrompt([int] $Round, [int] $Num, [bool] $Run, [string] $Path) {
+function Write-ChallengePrompt([int] $Round, [int] $Num, [bool] $Run, [string] $Path, [string] $At = '') {
   $lines = @(
     'You are an independent REVIEWER, asked to check a question with fresh eyes. Do not edit any files.',
     '',
     "The question and the evidence are in the file $ChDir/brief.md. Read it, then read the code and files it names, and anything else in the project you need. You may run read-only commands such as tests or linters."
   )
-  if ($Run) {
+  if ($At) {
+    $t = "You are working in a disposable copy of the project at commit $At, with no uncommitted changes and no later commits. Judge the project as of that commit."
+    if ($Run) { $t += ' You may run tests, builds and linters there; whatever they change in the copy is thrown away. Files ignored by git, such as installed dependencies, are not in the copy; if a check cannot run for that reason, say so.' }
+    $lines += @('', $t)
+  } elseif ($Run) {
     $lines += @('', 'You are working in a disposable copy of the project, with its uncommitted changes applied. You may run tests, builds and linters there; whatever they change in the copy is thrown away. Files ignored by git, such as installed dependencies, are not in the copy; if a check cannot run for that reason, say so.')
   }
   if ($Round -eq 1) {
@@ -727,11 +747,26 @@ function Write-ChallengePrompt([int] $Round, [int] $Num, [bool] $Run, [string] $
 }
 
 function Invoke-ChallengeInit([string[]] $A) {
-  if (@($A | Where-Object { $_ -like '--*' }).Count -gt 0) { Die 'usage: review.ps1 challenge init [tools]' }
-  $need = @($A | Where-Object { $_ }) -join ','   # codex,agy arrives as one argument or as several
+  $usage = 'usage: review.ps1 challenge init [--at <commit>] [tools]'
+  $at = ''; $tools = @()
+  for ($i = 0; $i -lt $A.Count; $i++) {
+    if ($A[$i] -eq '--at') {
+      if ($i + 1 -ge $A.Count -or -not $A[$i + 1] -or $A[$i + 1] -like '-*') { Die $usage }
+      $at = $A[$i + 1]; $i++; continue
+    }
+    if ($A[$i] -like '--*') { Die $usage }
+    $tools += $A[$i]
+  }
+  $need = @($tools | Where-Object { $_ }) -join ','   # codex,agy arrives as one argument or as several
   $checkOut = @(Invoke-Check $need -DeepWhenAny)
   & git rev-parse --verify HEAD *> $null
   if ($LASTEXITCODE -ne 0) { Die 'repository has no commits yet; make an initial commit first' 2 }
+  if ($at) {
+    $given = $at
+    $at = (& git rev-parse --verify --quiet "$given^{commit}" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $at) { Die "not a commit: $given" 2 }
+    $at = "$at".Trim()
+  }
   New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
   Set-Content -Path (Join-Path $StateDir '.gitignore') -Value '*' -Encoding ascii
   # A new challenge starts clean; the last one is kept in challenge-previous/.
@@ -751,6 +786,10 @@ function Invoke-ChallengeInit([string[]] $A) {
   }
   New-Item -ItemType Directory -Force -Path $ChDir | Out-Null
   [System.IO.File]::WriteAllText((Join-Path $top "$ChDir/reviews.tsv"), "round`tkind`ttool`tmodel`teffort`tseconds`ttokens`tattempts`tresult`n", $Utf8)
+  if ($at) {
+    [System.IO.File]::WriteAllText((Join-Path $top "$ChDir/at"), "$at`n", $Utf8)
+    Write-Output "challenge: every reviewer works in a clean copy of commit $($at.Substring(0, 12))"
+  }
   Write-Output "challenge: write the question and the evidence to $ChDir/brief.md, then run: challenge ask 1 <reviewers>"
   $checkOut | Where-Object { $_ -match '^READY_REVIEWERS:' } | ForEach-Object { Write-Output $_ }
 }
@@ -801,17 +840,25 @@ function Invoke-ChallengeAsk([string[]] $A) {
     $s.State = 'run'
   }
 
+  # challenge init --at: every reviewer, not only +run ones, gets a clean copy of that commit.
+  $at = ''
+  if (Test-NonEmpty "$ChDir/at") { $at = ([System.IO.File]::ReadAllText((Join-Path $top "$ChDir/at"))).Trim() }
+  if ($at) {
+    & git rev-parse --verify --quiet "$at^{commit}" *> $null
+    if ($LASTEXITCODE -ne 0) { Die "commit $at from $ChDir/at is gone" 2 }
+  }
+
   $before = Get-TreeState
   $env:SPARRING_REVIEW_TIMEOUT = "$limit"
   $started = Get-Date
   foreach ($s in $slots) {
     if ($s.State -ne 'run') { continue }
     $tag = "$ChDir/round-$r.$($s.Num)"
-    Write-ChallengePrompt $r $s.Num $s.Run (Join-Path $top "$tag.prompt.txt")
+    Write-ChallengePrompt $r $s.Num $s.Run (Join-Path $top "$tag.prompt.txt") $at
     Remove-Item -Force -ErrorAction SilentlyContinue "$tag.answer.json"
     $runDir = $top
-    if ($s.Run) {
-      $s.CopyDir = New-ReviewCopy
+    if ($s.Run -or $at) {
+      $s.CopyDir = New-ReviewCopy $at
       if (-not $s.CopyDir) {
         [Console]::Error.WriteLine("error: could not make a disposable copy of the project for reviewer $($s.Num)")
         $s.State = 'nocopy'; continue
@@ -903,7 +950,7 @@ function Invoke-Challenge([string[]] $A) {
   switch ($sub) {
     'init'  { Invoke-ChallengeInit $rest }
     'ask'   { Invoke-ChallengeAsk $rest }
-    default { Die 'usage: review.ps1 challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...' }
+    default { Die 'usage: review.ps1 challenge init [--at <commit>] [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...' }
   }
 }
 
@@ -915,5 +962,5 @@ switch ($cmd) {
   'review'  { Invoke-Review $rest }
   'restore' { Invoke-Restore $rest }
   'challenge' { Invoke-Challenge $rest }
-  default   { Die 'usage: review.ps1 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round> | challenge init [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...' }
+  default   { Die 'usage: review.ps1 init [tools] [--rounds N] [--tiebreaker] | status | review [--tiebreak] [--timeout SECONDS] <round> <tool>[+run] <model|default> <effort> [response-file] | restore [--tiebreak] <round> | challenge init [--at <commit>] [tools] | challenge ask [--timeout SECONDS] [--only N,M] <1|2> <tool/model:effort>...' }
 }

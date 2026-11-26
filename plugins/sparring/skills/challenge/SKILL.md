@@ -1,7 +1,7 @@
 ---
 name: challenge
 description: Sparring, review only. Have other vendors' CLIs (Codex, Antigravity in beta) check a question, diagnosis, analysis or decision independently, from the evidence alone, and report where they agree with Claude and where they don't. Changes no code.
-argument-hint: "[reviewer=tool/model:effort,...] [rounds=1|2] <question or claim to check>"
+argument-hint: "[reviewer=tool/model:effort,...] [rounds=1|2] [at=<commit>] <question or claim to check>"
 disable-model-invocation: true
 allowed-tools: Bash("${CLAUDE_SKILL_DIR}/../run/scripts/review.sh" challenge *) Bash(${CLAUDE_SKILL_DIR}/../run/scripts/review.sh challenge *) PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../run/scripts/review.ps1" challenge *) PowerShell(pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../run/scripts/review.ps1" challenge *) Bash(git status *) Bash(git diff *) Bash(git log *) Bash(git show *) Read Write Grep Glob
 ---
@@ -25,6 +25,7 @@ Read leading `key=value` options; everything else is the question.
 |---|---|---|
 | `reviewer=` | Reviewers, comma-separated. Each entry is `tool/model:effort`; `tool/` defaults to `codex/`, model `default` means the tool's own default, `:effort` defaults to `high`. A bare tool name works too: `agy`, `agy+run:medium` | one entry per ready tool: `codex/default:high,agy/default:high` |
 | `rounds=` | `2` allows one follow-up round in which the reviewers see your conclusion and reply; `1` stops after the first answers | `2` |
+| `at=` | A commit: every reviewer works in a clean disposable copy of it, without uncommitted changes, run notes or later commits. Set it yourself, even when the user did not, when the question is about a past commit, or when the working tree holds changes or notes that could lead the reviewers | none: reviewers read the live project (`agy+run` gets a copy with uncommitted changes) |
 
 Reviewer tools: `codex` (OpenAI Codex CLI, runs read-only commands in its own sandbox), `agy`
 (Google Antigravity CLI, beta: reads files only) and `agy+run` (agy in a disposable copy of
@@ -50,7 +51,7 @@ and `run_in_background: true`; wait for the completion notification and read its
 
 ## 2. Set up
 
-1. Run `CHALLENGE init <tools>`, where `<tools>` is the comma-separated set of tools in
+1. Run `CHALLENGE init [--at <commit>] <tools>` (`--at` from `at=`), where `<tools>` is the comma-separated set of tools in
    `reviewer=` (for example `codex,agy`). Without `reviewer=`, run `CHALLENGE init` with no
    tools, and use one `<tool>/default:high` entry for each tool on its `READY_REVIEWERS:`
    line. If only one is ready, use it, and say in the report that only one reviewer was
@@ -60,6 +61,8 @@ and `run_in_background: true`; wait for the completion notification and read its
    - If it reports missing prerequisites, run the `sparring:check` skill to fix them, then
      run `CHALLENGE init` again. Stop if they are still missing.
    - If it reports no commits, tell the user and stop.
+   - With `--at`, the reviewers see only that commit and `.sparring/challenge/`. Put every
+     file they need from elsewhere (logs, later versions, notes) in `.sparring/challenge/`.
 2. Gather the evidence yourself first: read the code, run read-only commands, collect logs.
 
 ## 3. Write the brief, without your conclusion
@@ -145,7 +148,9 @@ Report briefly:
 - Findings that changed your mind, and findings you still dispute, with why.
 - What nobody could verify (`unchecked`).
 - From `.sparring/challenge/reviews.tsv`: each reviewer call with the model that ran,
-  seconds, tokens and result, plus the total time and tokens.
+  seconds, tokens and result, plus the total time and tokens. If the question turned out to
+  be settled by the evidence alone (one log line, one failing assertion), say that one
+  reviewer at `medium` would have been enough next time.
 - Where the files are: `.sparring/challenge/` (the challenge before this one is in
   `.sparring/challenge-previous/`).
 

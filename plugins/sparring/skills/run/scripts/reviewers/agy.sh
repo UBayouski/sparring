@@ -9,7 +9,8 @@
 set -euo pipefail
 
 # --meta <log-file>: print what this adapter logged about the run (see codex.sh). agy's
-# envelope reports tokens but not the model, so only tokens= is printed.
+# envelope reports tokens but not the model; the model is read from agy's own log of the
+# conversation (brain/<conversation_id>/), when that file exists.
 if [[ "${1:-}" == --meta ]]; then
   sed -n 's/^sparring-meta: //p' "$2" | tr -d '\r'
   exit 0
@@ -49,6 +50,16 @@ run_agy() {  # <prompt> <timeout-seconds>
   agy "${a[@]}" </dev/null
 }
 tokens_of() { grep -o '"total_tokens": *[0-9]*' <<< "$1" | head -n 1 | grep -o '[0-9]*$' || true; }
+# The model that answered, from agy's transcript of the conversation (an internal file: if it
+# moves in a later agy version, nothing is printed and the driver records the requested model).
+model_of() {
+  local id f
+  id="$(grep -o '"conversation_id": *"[A-Za-z0-9-]*"' <<< "$1" | head -n 1 | sed 's/.*"\([A-Za-z0-9-]*\)"$/\1/')" || true
+  [[ -n "$id" ]] || return 0
+  f="${SPARRING_AGY_HOME:-$HOME/.gemini/antigravity-cli}/brain/$id/.system_generated/logs/transcript_full.jsonl"
+  [[ -f "$f" ]] || return 0
+  grep -o '"model": *"[A-Za-z0-9._:/-]*"' "$f" | tail -n 1 | sed 's/.*"\([^"]*\)"$/\1/' || true
+}
 
 prompt="$(cat "$prompt_file")"
 ((allow_commands)) || prompt+=$'\n\n'"$NO_COMMANDS"
@@ -64,6 +75,7 @@ if ((!allow_commands)) && ! grep -q '"structured_output"' <<< "$envelope" && gre
   t="$(tokens_of "$envelope")"; [[ -n "$t" ]] && total=$(( ${total:-0} + t ))
 fi
 [[ -n "$total" ]] && echo "sparring-meta: tokens=$total" >&2
+ran="$(model_of "$envelope")"; [[ -n "$ran" ]] && echo "sparring-meta: model=$ran" >&2
 echo "sparring-meta: attempts=$attempts" >&2
 
 # The verdict is in the envelope's structured_output field. Use whichever JSON tool exists.

@@ -31,6 +31,12 @@ if (`$env:FAKE_TOUCH) { Add-Content -Path `$env:FAKE_TOUCH -Value 'touched' }
 if (`$env:FAKE_CREATE) { Set-Content -Path `$env:FAKE_CREATE -Value 'created' }
 if (`$env:FAKE_DELETE) { Remove-Item -Force -LiteralPath `$env:FAKE_DELETE }
 if (`$env:FAKE_SLEEP) { Start-Sleep -Seconds ([int] `$env:FAKE_SLEEP) }
+# Where it ran, and what it saw there: a.py's last line, .sparring's entries, branch count.
+(Get-Location).Path | Set-Content -Encoding utf8 "`$env:FAKE_ARGS.ccwd"
+`$last = if (Test-Path a.py) { @(Get-Content a.py)[-1] } else { '' }
+`$sp = (@(Get-ChildItem -Force -Name .sparring -ErrorAction SilentlyContinue) -join ' ')
+`$refs = @(& git for-each-ref refs/heads refs/remotes 2>`$null).Count
+"`$last|`$sp|`$refs" | Set-Content -Encoding utf8 "`$env:FAKE_ARGS.ccopy"
 # What codex exec logs: the model in its header, then the token count.
 [Console]::Error.WriteLine('model: gpt-fake'); [Console]::Error.WriteLine('tokens used'); [Console]::Error.WriteLine('1,234')
 for (`$i = 0; `$i -lt `$a.Count; `$i++) { if (`$a[`$i] -eq '-o') { `$out = `$a[`$i + 1] } }
@@ -72,7 +78,7 @@ if (`$env:FAKE_AGY_DENY) {
 `$so = '$approve'
 if (`$a[1] -like '*check a question*') { `$so = '$answer' }
 if (`$a[1] -like '*check a question*This is round 2*') { `$so = '$reply' }
-'{"status":"SUCCESS","response":"...","structured_output":' + `$so + ',"usage":{"total_tokens":1}}'
+'{"conversation_id":"fake-conv-1","status":"SUCCESS","response":"...","structured_output":' + `$so + ',"usage":{"total_tokens":1}}'
 exit 0
 "@ | Set-Content -Encoding ascii "$T\bin\agy.ps1"
 
@@ -344,6 +350,36 @@ try {
   $out = Invoke-Rev challenge init
   Remove-Item Env:FAKE_AGY_PROBE, Env:FAKE_AGY_PROBE_EXIT
   Test-That 'no tools: a signed-out agy is left out' ($code -eq 0 -and $out -match 'READY_REVIEWERS: codex' -and $out -notmatch 'READY_REVIEWERS: codex agy')
+
+  'challenge --at (clean copy of a commit)'
+  $headSha = (& git rev-parse HEAD).Trim()
+  $out = Invoke-Rev challenge init --at HEAD codex,agy
+  Test-That '--at: commit saved' ($code -eq 0 -and (Get-Content .sparring\challenge\at).Trim() -eq $headSha -and $out -match "clean copy of commit $($headSha.Substring(0, 12))")
+  $null = Invoke-Rev challenge init --at nosuchrev codex
+  Test-That '--at: a bad commit is refused' ($code -eq 2)
+  $null = Invoke-Rev challenge init --at HEAD codex,agy
+  Set-Content -Encoding ascii .sparring\challenge\brief.md 'Why does x stay 1?'
+  Add-Content -Path a.py -Value 'a dirty line'   # an uncommitted change the reviewers must not see
+  Remove-Item "$env:FAKE_ARGS.ccwd", "$T\agyargs.txt.cwd" -ErrorAction SilentlyContinue
+  $env:FAKE_AGY_ARGS = "$T\agyargs.txt"
+  $out = Invoke-Rev challenge ask 1 codex agy
+  $ccwd = if (Test-Path "$env:FAKE_ARGS.ccwd") { (Get-Content "$env:FAKE_ARGS.ccwd" | Select-Object -First 1).Trim() } else { '' }
+  $acwd = if (Test-Path "$T\agyargs.txt.cwd") { (Get-Content "$T\agyargs.txt.cwd" | Select-Object -First 1).Trim() } else { '' }
+  Test-That '--at: both answered' ($code -eq 0 -and $out -match 'reviewer 1: codex/default:high, ok' -and $out -match 'reviewer 2: agy/default:high, ok')
+  Test-That '--at: codex ran in a copy too' ($ccwd -match 'sparring-copy\.[0-9a-f]+\\project$' -and $acwd -match 'sparring-copy\.[0-9a-f]+\\project$' -and $ccwd -ne $acwd)
+  $want = "$(@(& git show HEAD:a.py)[-1])|challenge|0"
+  $got = (Get-Content "$env:FAKE_ARGS.ccopy" | Select-Object -First 1).Trim()
+  Test-That '--at: copy is the commit alone' ($got -eq $want)
+  Test-That '--at: plain agy still in plan mode' ((Get-Content "$T\agyargs.txt") -contains 'plan')
+  Test-That '--at: prompt names the commit' ((Get-Content -Raw .sparring\challenge\round-1.1.prompt.txt) -match "at commit $headSha, with no uncommitted changes")
+  Test-That '--at: copies removed afterwards' ($ccwd -and -not (Test-Path -LiteralPath (Split-Path -Parent $ccwd)) -and -not (Test-Path -LiteralPath (Split-Path -Parent $acwd)))
+  $tr = "$T\agyhome\brain\fake-conv-1\.system_generated\logs"
+  New-Item -ItemType Directory -Force -Path $tr | Out-Null
+  Set-Content -Encoding ascii "$tr\transcript_full.jsonl" @('{"model":"gemini-fake-low"}', '{"model":"gemini-fake-high"}')
+  $env:SPARRING_AGY_HOME = "$T\agyhome"
+  $null = Invoke-Rev challenge ask --only 2 1 codex agy
+  Remove-Item Env:SPARRING_AGY_HOME, Env:FAKE_AGY_ARGS
+  Test-That 'agy: model read from its transcript' ((Get-Content .sparring\challenge\reviews.tsv)[-1] -match "^1`tchallenge-2`tagy`tgemini-fake-high`thigh`t")
   & git checkout -q -- a.py
 
   'status'

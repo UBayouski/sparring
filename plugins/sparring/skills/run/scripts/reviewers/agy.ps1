@@ -1,8 +1,8 @@
 # Reviewer adapter: Google Antigravity CLI (agy), PowerShell. Beta. Same contract as agy.sh:
 #   agy.ps1 <model|default> <effort> <schema-file> <out-file> <prompt-file>
 # Runs in plan mode with the terminal sandbox on; the driver rejects the review if any file changed.
-#   agy.ps1 --meta <log-file>   print what this adapter logged about the run (tokens= only;
-#   agy's envelope does not report the model)
+#   agy.ps1 --meta <log-file>   print what this adapter logged about the run (tokens=, and
+#   model= read from agy's own log of the conversation, since its envelope does not report it)
 param([string] $Model, [string] $Effort, [string] $Schema, [string] $Out, [string] $PromptFile)
 $ErrorActionPreference = 'Continue'
 
@@ -67,6 +67,16 @@ if (-not $allowCommands -and $null -eq $data.structured_output -and $denied -and
   if ($data -and $data.usage -and $data.usage.total_tokens) { $total = [long] $total + [long] $data.usage.total_tokens }
 }
 if ($null -ne $total) { [Console]::Error.WriteLine("sparring-meta: tokens=$total") }
+# The model that answered, from agy's transcript of the conversation (an internal file: if it
+# moves in a later agy version, nothing is printed and the driver records the requested model).
+if ($data -and $data.conversation_id -match '^[A-Za-z0-9-]+$') {
+  $agyHome = if ($env:SPARRING_AGY_HOME) { $env:SPARRING_AGY_HOME } else { Join-Path $HOME '.gemini\antigravity-cli' }
+  $tr = Join-Path $agyHome "brain\$($data.conversation_id)\.system_generated\logs\transcript_full.jsonl"
+  if (Test-Path -LiteralPath $tr) {
+    $hits = @([regex]::Matches([System.IO.File]::ReadAllText($tr), '"model": *"([A-Za-z0-9._:/-]+)"'))
+    if ($hits.Count -gt 0) { [Console]::Error.WriteLine("sparring-meta: model=$($hits[-1].Groups[1].Value)") }
+  }
+}
 [Console]::Error.WriteLine("sparring-meta: attempts=$attempts")
 
 if ($null -eq $data -or $null -eq $data.structured_output) { [Console]::Error.WriteLine("agy envelope has no structured_output: $envelope"); exit 4 }
