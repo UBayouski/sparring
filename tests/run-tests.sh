@@ -315,6 +315,10 @@ mkdir -p "$T/agyhome/brain/fake-conv-1/.system_generated/logs"
 printf '{"model":"gemini-fake-low"}\n{"model":"gemini-fake-high"}\n' > "$T/agyhome/brain/fake-conv-1/.system_generated/logs/transcript_full.jsonl"
 SPARRING_AGY_HOME="$T/agyhome" FAKE_AGY_ARGS="$T/agyargs" "$REVIEW" challenge ask --only 2 1 codex agy </dev/null >/dev/null 2>&1
 check "agy: model read from its transcript" 'tail -n 1 .sparring/challenge/reviews.tsv | grep -qP "^1\tchallenge-2\tagy\tgemini-fake-high\thigh\t"'
+git config core.autocrlf true   # a.py is dirty with LF endings: plain git would warn about CRLF
+out="$("$REVIEW" challenge ask --only 1 1 codex agy </dev/null 2>&1)"; code=$?
+check "no CRLF warnings in the output"     '[[ $code -eq 0 && "$out" != *"LF will be replaced"* ]]'
+git config --unset core.autocrlf
 git checkout -q -- a.py
 
 echo "status"

@@ -380,6 +380,12 @@ try {
   $null = Invoke-Rev challenge ask --only 2 1 codex agy
   Remove-Item Env:SPARRING_AGY_HOME, Env:FAKE_AGY_ARGS
   Test-That 'agy: model read from its transcript' ((Get-Content .sparring\challenge\reviews.tsv)[-1] -match "^1`tchallenge-2`tagy`tgemini-fake-high`thigh`t")
+  # a.py dirty with LF endings only, and autocrlf on: plain git would warn about CRLF.
+  [System.IO.File]::WriteAllText((Join-Path (Get-Location) 'a.py'), ((@(& git show HEAD:a.py) + 'a dirty line') -join "`n") + "`n")
+  & git config core.autocrlf true
+  $out = Invoke-RevErr challenge ask --only 1 1 codex agy
+  & git config --unset core.autocrlf
+  Test-That 'no CRLF warnings in the output' ($code -eq 0 -and $out -notmatch 'LF will be replaced')
   & git checkout -q -- a.py
 
   'status'

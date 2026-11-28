@@ -50,6 +50,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA="$SCRIPT_DIR/../review.schema.json"
 CHECK="$SCRIPT_DIR/../../check/scripts/check-prereqs.sh"
 
+# Silence git's "LF will be replaced by CRLF" warnings, which only clutter the output here:
+# core.safecrlf=false changes no file content. Added after any GIT_CONFIG_* the user set.
+n="${GIT_CONFIG_COUNT:-0}"; [[ "$n" =~ ^[0-9]+$ ]] || n=0
+export "GIT_CONFIG_KEY_$n=core.safecrlf" "GIT_CONFIG_VALUE_$n=false" "GIT_CONFIG_COUNT=$((n + 1))"
+unset n
+
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git repository" 2
 cd "$(git rev-parse --show-toplevel)"
 STATE_DIR="${SPARRING_DIR:-.sparring}"

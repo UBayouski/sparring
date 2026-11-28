@@ -303,6 +303,10 @@ lines, any of which may be missing; the driver records them in `reviews.tsv`. Wh
   Bash). A two-round `challenge` with Codex and `agy+run` has run from both drivers. The smoke
   tests (`tests/run-tests.{sh,ps1}`) use fake reviewers and cover non-ASCII file names and
   content. Reports from macOS and Linux welcome.
+  On Windows, Codex's sandbox can stop a test runner from starting child processes
+  (`spawn EPERM`, seen with `node --test`). In that run Codex worked around it by turning
+  the test runner's process isolation off, and said so in its answer. If your tests can only run
+  with child processes, use `agy+run` for questions that need a test run.
 
 ## Layout
 

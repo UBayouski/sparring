@@ -30,6 +30,14 @@ $Schema = Join-Path (Split-Path -Parent $ScriptDir) 'review.schema.json'
 $Check = Join-Path $ScriptDir '..\..\check\scripts\check-prereqs.ps1'
 $PsHost = (Get-Process -Id $PID).Path
 
+# Silence git's "LF will be replaced by CRLF" warnings, which only clutter the output here:
+# core.safecrlf=false changes no file content. Added after any GIT_CONFIG_* the user set.
+$n = 0
+if ($env:GIT_CONFIG_COUNT -match '^[0-9]+$') { $n = [int] $env:GIT_CONFIG_COUNT }
+Set-Item "env:GIT_CONFIG_KEY_$n" 'core.safecrlf'
+Set-Item "env:GIT_CONFIG_VALUE_$n" 'false'
+$env:GIT_CONFIG_COUNT = [string] ($n + 1)
+
 if (-not (Have git)) { Die 'git not found; run /sparring:check' 2 }
 $top = (& git rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $top) { Die 'not inside a git repository' 2 }
