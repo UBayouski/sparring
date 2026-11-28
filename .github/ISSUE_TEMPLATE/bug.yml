@@ -1,0 +1,50 @@
+name: Bug
+description: Something failed or gave a wrong result.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Please remove private code, paths or project names before posting.
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command
+      options:
+        - /sparring:run
+        - /sparring:challenge
+        - /sparring:check
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows (Git Bash)
+        - Windows (PowerShell only)
+        - WSL
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: The sparring plugin version, plus the versions /sparring:check prints (Claude Code, codex, agy, git).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Error output or log lines
+      description: The last lines of the review log in .sparring/ usually show the cause.
+      render: text

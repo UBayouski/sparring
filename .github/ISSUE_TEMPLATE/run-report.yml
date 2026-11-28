@@ -1,0 +1,68 @@
+name: Run report
+description: Tell how a sparring run went, good or bad. This is the feedback that helps most.
+title: "[run] "
+labels: ["run report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying sparring. A few lines are enough; skip any field you don't know.
+        Please remove private code, paths or project names before posting.
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command
+      options:
+        - /sparring:run
+        - /sparring:challenge
+        - /sparring:check
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows (Git Bash)
+        - Windows (PowerShell only)
+        - WSL
+    validations:
+      required: true
+  - type: checkboxes
+    id: reviewers
+    attributes:
+      label: Reviewers used
+      options:
+        - label: Codex
+        - label: Antigravity (agy)
+        - label: agy+run
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How did it go?
+      options:
+        - Useful, it caught or confirmed something
+        - Worked, but added little
+        - Partly worked
+        - Failed
+    validations:
+      required: true
+  - type: textarea
+    id: story
+    attributes:
+      label: What happened
+      description: What you asked for, what the reviewers said, and whether that helped.
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: What would you change?
+  - type: textarea
+    id: tsv
+    attributes:
+      label: reviews.tsv lines (optional)
+      description: From .sparring/ in your project. It shows models, tokens and timings.
+      render: text
